@@ -1,0 +1,21 @@
+{
+  "name": "personalberatung-signals",
+  "version": "0.1.0",
+  "description": "b+p Mandate Radar - Prototyp: URL -> Signal-Extraktion -> Priority Score -> Neon",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "example": "node --env-file=.env examples/run-example.js"
+  },
+  "dependencies": {
+    "@neon/config": "^1.7.2",
+    "@neon/env": "^1.4.3",
+    "fast-xml-parser": "^5.0.0",
+    "openai": "^4.73.0",
+    "pg": "^8.13.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

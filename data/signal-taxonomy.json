@@ -1,0 +1,70 @@
+{
+  "version": "0.3.0",
+  "description": "b+p Mandate Radar - Pilot-Scope: 3 Signalgruppen (C-Level, PE, Restrukturierung)",
+  "signals": [
+    {
+      "id": "C_LEVEL_DEPARTURE",
+      "label": "Konkreter Besetzungsanlass",
+      "description": "C-Level-Abgang, Arbeitgeberwechsel, Freistellung, Interimsloesung, neue Funktion, ungeloeste Nachfolge, oeffentliche Ausschreibung.",
+      "base_weight": 90,
+      "grundgewichtung": "Sehr hoch",
+      "subtypes": [
+        "departure_confirmed",
+        "departure_announced",
+        "departure_rumored",
+        "employer_change",
+        "release_from_duties",
+        "interim_appointment",
+        "new_position",
+        "unresolved_succession",
+        "public_search"
+      ],
+      "typical_roles": [
+        "CEO","CFO","COO","CTO","CIO","CHRO","CMO","CRO",
+        "Geschaeftsfuehrer","Vorstand","Aufsichtsrat","Bereichsleiter","Deutschland-Chef","Landeschef"
+      ]
+    },
+    {
+      "id": "PE_TRANSACTION",
+      "label": "Eigentuemerwechsel / PE",
+      "description": "PE-Einstieg, Buy-and-Build, Add-on, MBO, Carve-out, Exit, Generationenwechsel.",
+      "base_weight": 70,
+      "grundgewichtung": "Mittel bis hoch",
+      "subtypes": [
+        "pe_entry",
+        "buy_and_build",
+        "add_on_acquisition",
+        "mbo",
+        "carve_out",
+        "exit",
+        "generation_change",
+        "majority_stake",
+        "minority_stake"
+      ],
+      "typical_roles": [
+        "CEO","CFO","COO","Head of M&A","Integration Lead","Commercial Excellence","HR Director"
+      ]
+    },
+    {
+      "id": "RESTRUCTURING",
+      "label": "Restrukturierung / Krise",
+      "description": "Ergebniswarnung, Sanierung, Standortschliessung, Personalabbau, CRO-Suche, Covenant- oder Liquiditaetsprobleme. Bonitaet vor Ansprache pruefen.",
+      "base_weight": 65,
+      "grundgewichtung": "Hoch, Bonitaet pruefen",
+      "subtypes": [
+        "profit_warning",
+        "reorganisation",
+        "site_closure",
+        "layoffs",
+        "cro_search",
+        "insolvency",
+        "self_administration",
+        "covenant_breach",
+        "liquidity_issue"
+      ],
+      "typical_roles": [
+        "CRO","CFO","COO","Werkleiter","HR-Leiter","Transformation Lead","Supply Chain","Interim-Manager"
+      ]
+    }
+  ]
+}
