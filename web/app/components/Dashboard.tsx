@@ -3,6 +3,7 @@
 import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { UserButton } from "@clerk/nextjs";
 import type {
   CaseRow, SignalRow, StatsRow, EmergingCompanyRow, ContactRow,
 } from "@/lib/db";
@@ -516,6 +517,9 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
           <button className="btn btn-primary" onClick={() => setShowBatch(true)} title="Alle Zielunternehmen der Reihe nach durch die KI schicken">
             Alle Firmen scannen
           </button>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}>
+            <UserButton afterSignOutUrl="/sign-in" />
+          </div>
         </div>
 
         <main className="content space-y-7">
