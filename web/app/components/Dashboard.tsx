@@ -518,7 +518,7 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
             Alle Firmen scannen
           </button>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}>
-            <UserButton afterSignOutUrl="/sign-in" />
+            <UserButton />
           </div>
         </div>
 
