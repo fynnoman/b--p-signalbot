@@ -14,6 +14,15 @@ type UsageTotal = { prompt: number; completion: number; tokens: number; cost_usd
 type UsageByModel = { model: string | null; total_prompt_tokens: number; total_completion_tokens: number; total_tokens: number; cases_with_llm: number; cost_usd: number | null };
 type UsagePayload = { by_model: UsageByModel[]; total: UsageTotal };
 
+function useDebouncedValue<T>(value: T, delayMs = 300): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 const SIGNAL_LABEL: Record<string, string> = {
   C_LEVEL_DEPARTURE: "Konkreter Besetzungsanlass",
   PE_TRANSACTION: "Eigentümerwechsel / PE",
@@ -175,6 +184,7 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
   const [singleSubmitting, setSingleSubmitting] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeJobIdRef = useRef<string | null>(null);
 
   const [jobHistory, setJobHistory] = useState<Job[]>([]);
 
@@ -215,9 +225,10 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
     })();
   }, []);
 
+  const debouncedHubspotQuery = useDebouncedValue(hubspotQuery, 300);
   const loadHubspot = useCallback(async () => {
     const params = new URLSearchParams();
-    if (hubspotQuery.trim()) params.set("q", hubspotQuery.trim());
+    if (debouncedHubspotQuery.trim()) params.set("q", debouncedHubspotQuery.trim());
     params.set("limit", String(HUBSPOT_PAGE_SIZE));
     params.set("offset", String(hubspotPage * HUBSPOT_PAGE_SIZE));
     const res = await fetch(`/api/contacts?${params.toString()}`, { cache: "no-store" });
@@ -225,7 +236,7 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
     const data = (await res.json()) as { rows: ContactRow[]; total: number };
     setHubspotRows(data.rows);
     setHubspotTotal(data.total);
-  }, [hubspotQuery, hubspotPage]);
+  }, [debouncedHubspotQuery, hubspotPage]);
 
   useEffect(() => {
     if (tab === "hubspot") loadHubspot();
@@ -262,13 +273,16 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    activeJobIdRef.current = null;
   }, []);
 
   const pollJob = useCallback(async (jobId: string) => {
+    if (activeJobIdRef.current !== jobId) return;
     try {
       const res = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" });
       if (!res.ok) return;
       const job = (await res.json()) as Job;
+      if (activeJobIdRef.current !== jobId) return;
       setActiveJob(job);
       if (job.status !== "running") {
         stopPolling();
@@ -308,9 +322,10 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
         return;
       }
       const job = (await res.json()) as Job;
+      stopPolling();
+      activeJobIdRef.current = job.id;
       setActiveJob(job);
       setShowBatch(false);
-      stopPolling();
       pollRef.current = setInterval(() => pollJob(job.id), 2000);
       pollJob(job.id);
     } catch (err) {
@@ -318,7 +333,7 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
     } finally {
       setBatchSubmitting(false);
     }
-  }, [batchLimit, batchPer, batchMode, pollJob, stopPolling]);
+  }, [batchLimit, batchPer, batchMode, batchConcurrency, pollJob, stopPolling]);
 
   const submitSingle = useCallback(async () => {
     setSingleError(null);
@@ -336,10 +351,11 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
         return;
       }
       const job = (await res.json()) as Job;
+      stopPolling();
+      activeJobIdRef.current = job.id;
       setActiveJob(job);
       setShowSingle(false);
       setSingleCompany("");
-      stopPolling();
       pollRef.current = setInterval(() => pollJob(job.id), 1500);
       pollJob(job.id);
     } catch (err) {
@@ -539,7 +555,7 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
 
           {activeJob && (
             <>
-              <JobPanel job={activeJob} onDismiss={() => { setActiveJob(null); setJobContacts(null); }} />
+              <JobPanel job={activeJob} onDismiss={() => { stopPolling(); setActiveJob(null); setJobContacts(null); }} />
               {activeJob.type === "single" && activeJob.status === "done" && jobContacts && (
                 <ContactMatchPanel company={activeJob.company ?? ""} contacts={jobContacts} />
               )}
@@ -1357,15 +1373,6 @@ function CaseDetails({
   );
 }
 
-function Meta({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div style={{ color: "var(--text-mute)" }}>{label}</div>
-      <div className="mt-0.5">{value}</div>
-    </div>
-  );
-}
-
 function MiniStat({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="panel-2 px-2 py-1">
@@ -1493,7 +1500,7 @@ function CompanyDossier({
                     <div className="prio">{c.case_priority}</div>
                     <div>
                       <div className="title">
-                        {c.case_title ?? c.top_signal_id ? prettySignal(c.top_signal_id ?? "") : "Ohne Titel"}
+                        {c.case_title ?? (c.top_signal_id ? prettySignal(c.top_signal_id) : "Ohne Titel")}
                       </div>
                       <div className="sub">
                         {formatDateShort(c.created_at)}
@@ -1739,16 +1746,17 @@ function HubspotCompaniesTable({
   const [companies, setCompanies] = useState<{ company_name: string; contact_count: number; is_target: boolean; last_activity: string | null }[]>([]);
   const [total, setTotal] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, ContactRow[] | "loading" | undefined>>({});
+  const debouncedQuery = useDebouncedValue(query, 300);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams();
-    if (query.trim()) params.set("q", query.trim());
+    if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
     const res = await fetch(`/api/contacts/by-company?${params.toString()}`, { cache: "no-store" });
     if (!res.ok) return;
     const data = (await res.json()) as { companies: typeof companies; total: number };
     setCompanies(data.companies);
     setTotal(data.total);
-  }, [query]);
+  }, [debouncedQuery]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -1873,16 +1881,17 @@ function CompaniesTab() {
   const [query, setQuery] = useState("");
   const [newName, setNewName] = useState("");
   const [busy, setBusy] = useState(false);
+  const debouncedQuery = useDebouncedValue(query, 300);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams();
-    if (query.trim()) params.set("q", query.trim());
+    if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
     const res = await fetch(`/api/target-companies?${params.toString()}`, { cache: "no-store" });
     if (!res.ok) return;
     const data = (await res.json()) as { rows: typeof rows; total: number };
     setRows(data.rows);
     setTotal(data.total);
-  }, [query]);
+  }, [debouncedQuery]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -2451,10 +2460,11 @@ function SourcesModal({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const pageSize = 50;
+  const debouncedQuery = useDebouncedValue(query, 300);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams();
-    if (query.trim()) params.set("q", query.trim());
+    if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
     params.set("limit", String(pageSize));
     params.set("offset", String(page * pageSize));
     const res = await fetch(`/api/sources?${params.toString()}`, { cache: "no-store" });
@@ -2462,7 +2472,7 @@ function SourcesModal({ onClose }: { onClose: () => void }) {
     const data = (await res.json()) as { rows: SourceRow[]; total: number };
     setRows(data.rows);
     setTotal(data.total);
-  }, [query, page]);
+  }, [debouncedQuery, page]);
 
   useEffect(() => { load(); }, [load]);
 

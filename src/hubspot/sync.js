@@ -138,6 +138,8 @@ export async function syncCompanies({ acceptedTypes = null } = {}) {
 
 /**
  * Pullt alle Contacts und aktualisiert die vorhandene hubspot_contacts-Tabelle.
+ * Danach wird target_companies.contact_count neu berechnet, damit account_fit
+ * nicht auf dem alten CSV-Stand haengen bleibt.
  */
 export async function syncContacts() {
   const pool = await getPool();
@@ -189,7 +191,27 @@ export async function syncContacts() {
     await client.query("ROLLBACK");
     throw err;
   } finally { client.release(); }
-  return { inserted };
+
+  // target_companies.contact_count aus hubspot_contacts neu ableiten.
+  const refreshed = await refreshTargetContactCounts();
+  return { inserted, refreshed_targets: refreshed };
+}
+
+async function refreshTargetContactCounts() {
+  const pool = await getPool();
+  const res = await pool.query(
+    `UPDATE target_companies tc
+       SET contact_count = sub.n
+      FROM (
+        SELECT lower(trim(company_name)) AS key, COUNT(*)::int AS n
+        FROM hubspot_contacts
+        WHERE company_name IS NOT NULL AND trim(company_name) <> ''
+        GROUP BY lower(trim(company_name))
+      ) sub
+      WHERE lower(tc.name) = sub.key
+        AND tc.contact_count IS DISTINCT FROM sub.n`,
+  );
+  return res.rowCount ?? 0;
 }
 
 export async function syncDeals() {

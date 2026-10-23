@@ -114,20 +114,18 @@ export function startBatchScan(input: {
   perCompany?: number;
   mode?: JobMode;
   concurrency?: number;
-  source?: "bing" | "google";
 }): Job {
   const limitCompanies = input.limitCompanies == null ? 0 : clampInt(input.limitCompanies, 1, 10000);
   const perCompany = clampInt(input.perCompany ?? 1, 1, 10);
   const mode: JobMode = input.mode === "broad" ? "broad" : "focused";
   const concurrency = clampInt(input.concurrency ?? 5, 1, 20);
-  const source: "bing" | "google" = input.source === "google" ? "google" : "bing";
 
   const job = newJob({
     type: "batch",
     label:
       limitCompanies > 0
-        ? `Batch: Top ${limitCompanies} Zielfirmen (${source})`
-        : `Batch: alle Zielfirmen (${source})`,
+        ? `Batch: Top ${limitCompanies} Zielfirmen`
+        : `Batch: alle Zielfirmen`,
     limit: perCompany,
     mode,
     concurrency,
@@ -141,7 +139,6 @@ export function startBatchScan(input: {
     `--per-company=${perCompany}`,
     `--mode=${mode}`,
     `--concurrency=${concurrency}`,
-    `--source=${source}`,
   ];
   if (limitCompanies > 0) args.push(`--limit-companies=${limitCompanies}`);
   spawnAndAttach(job, args);
