@@ -68,7 +68,12 @@ async function* searchCompaniesByType(acceptedTypes: string[], properties: strin
   }
 }
 
-export async function syncCompanies(opts: { acceptedTypes?: string[] | null } = {}): Promise<{ inserted: number; skipped: number }> {
+export type SyncProgress = { inserted: number; skipped: number };
+
+export async function syncCompanies(opts: {
+  acceptedTypes?: string[] | null;
+  onProgress?: (p: SyncProgress) => void;
+} = {}): Promise<{ inserted: number; skipped: number }> {
   const pool = getPool();
   const acceptedTypes = opts.acceptedTypes && opts.acceptedTypes.length > 0 ? opts.acceptedTypes : null;
   let inserted = 0;
@@ -108,16 +113,22 @@ export async function syncCompanies(opts: { acceptedTypes?: string[] | null } = 
         ],
       );
       inserted += 1;
+      if (opts.onProgress && (inserted + skipped) % 25 === 0) {
+        opts.onProgress({ inserted, skipped });
+      }
     }
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally { client.release(); }
+  opts.onProgress?.({ inserted, skipped });
   return { inserted, skipped };
 }
 
-export async function syncContacts(): Promise<{ inserted: number; refreshed_targets: number }> {
+export async function syncContacts(opts: {
+  onProgress?: (p: { inserted: number }) => void;
+} = {}): Promise<{ inserted: number; refreshed_targets: number }> {
   const pool = getPool();
   let inserted = 0;
   const client = await pool.connect();
@@ -148,12 +159,17 @@ export async function syncContacts(): Promise<{ inserted: number; refreshed_targ
         ],
       );
       inserted += 1;
+      if (opts.onProgress && inserted % 50 === 0) {
+        opts.onProgress({ inserted });
+      }
     }
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally { client.release(); }
+
+  opts.onProgress?.({ inserted });
 
   const refresh = await pool.query(
     `UPDATE target_companies tc

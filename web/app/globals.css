@@ -41,6 +41,7 @@
   --hot:         #ff3b30;
   --hot-bg:      rgba(255, 59, 48, 0.10);
   --hot-border:  rgba(255, 59, 48, 0.28);
+  --good:        #15803d;
   --warm:        #ff9500;
   --warm-bg:     rgba(255, 149, 0, 0.12);
   --warm-border: rgba(255, 149, 0, 0.28);
@@ -524,6 +525,15 @@ input[type="checkbox"], input[type="radio"] {
   display: inline-block;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+@keyframes sync-progress-slide {
+  0%   { transform: translateX(-120%); }
+  60%  { transform: translateX(220%); }
+  100% { transform: translateX(220%); }
+}
+.sync-progress-indeterminate {
+  animation: sync-progress-slide 1.4s ease-in-out infinite;
+}
 
 /* ============================================================
    Dialog (modal centered)

@@ -2325,29 +2325,73 @@ type HsStatus = {
   deals:     { n: number; last: string | null };
   lists:     { n: number; last: string | null };
 };
-type HsJob = {
-  id: string;
-  status: "running" | "done" | "error";
-  started_at: string;
-  ended_at: string | null;
-  logs: string[];
-  only: string;
-  types: string | null;
-  exit_code: number | null;
+
+type HubspotCompanyTypeOption = { label: string; value: string };
+type SyncPhase = "companies" | "contacts";
+type SyncProgressState = {
+  phase: SyncPhase | null;
+  phaseLabel: string;
+  companiesInserted: number;
+  companiesSkipped: number;
+  contactsInserted: number;
+  refreshedTargets: number | null;
+  startedAt: number | null;
+  elapsedMs: number;
+  status: "idle" | "running" | "done" | "error";
   error: string | null;
 };
 
-type HubspotCompanyTypeOption = { label: string; value: string };
+const INITIAL_PROGRESS: SyncProgressState = {
+  phase: null, phaseLabel: "",
+  companiesInserted: 0, companiesSkipped: 0,
+  contactsInserted: 0, refreshedTargets: null,
+  startedAt: null, elapsedMs: 0,
+  status: "idle", error: null,
+};
+
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rest = (s % 60).toString().padStart(2, "0");
+  return `${m}:${rest} min`;
+}
+
+function applyEvent(event: Record<string, unknown>, setProgress: React.Dispatch<React.SetStateAction<SyncProgressState>>) {
+  const type = event.type as string | undefined;
+  if (type === "phase") {
+    setProgress((prev) => ({
+      ...prev,
+      phase: event.phase as SyncPhase,
+      phaseLabel: (event.label as string | undefined) ?? "",
+    }));
+  } else if (type === "progress") {
+    const phase = event.phase as SyncPhase;
+    setProgress((prev) => phase === "companies"
+      ? { ...prev, phase, companiesInserted: (event.inserted as number) ?? prev.companiesInserted, companiesSkipped: (event.skipped as number) ?? prev.companiesSkipped }
+      : { ...prev, phase, contactsInserted: (event.inserted as number) ?? prev.contactsInserted },
+    );
+  } else if (type === "phase_done") {
+    const phase = event.phase as SyncPhase;
+    setProgress((prev) => phase === "companies"
+      ? { ...prev, companiesInserted: (event.inserted as number) ?? prev.companiesInserted, companiesSkipped: (event.skipped as number) ?? prev.companiesSkipped }
+      : { ...prev, contactsInserted: (event.inserted as number) ?? prev.contactsInserted, refreshedTargets: (event.refreshed_targets as number | null | undefined) ?? prev.refreshedTargets },
+    );
+  } else if (type === "done") {
+    setProgress((prev) => ({ ...prev, status: "done", phase: null, phaseLabel: "" }));
+  } else if (type === "error") {
+    setProgress((prev) => ({ ...prev, status: "error", error: (event.message as string | undefined) ?? "Fehler" }));
+  }
+}
 
 function HubspotSyncPanel() {
   const [status, setStatus] = useState<HsStatus | null>(null);
-  const [job, setJob] = useState<HsJob | null>(null);
+  const [progress, setProgress] = useState<SyncProgressState>(INITIAL_PROGRESS);
   const [only, setOnly] = useState<"both" | "companies" | "contacts">("both");
   const [selectedTypes, setSelectedTypes] = useState<string[]>(["Kunde", "nicht aktiver Kunde"]);
   const [typeOptions, setTypeOptions] = useState<HubspotCompanyTypeOption[]>([]);
   const [typeOptionsError, setTypeOptionsError] = useState<string | null>(null);
-  const [starting, setStarting] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadStatus = useCallback(async () => {
     const res = await fetch(`/api/hubspot/status`, { cache: "no-store" });
@@ -2368,20 +2412,26 @@ function HubspotSyncPanel() {
   useEffect(() => { loadStatus(); }, [loadStatus]);
   useEffect(() => { loadTypeOptions(); }, [loadTypeOptions]);
 
-  const stopPoll = useCallback(() => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  const stopTick = useCallback(() => {
+    if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
   }, []);
 
-  const pollJob = useCallback(async (id: string) => {
-    const res = await fetch(`/api/hubspot/sync?id=${id}`, { cache: "no-store" });
-    if (!res.ok) return;
-    const j = (await res.json()) as HsJob;
-    setJob(j);
-    if (j.status !== "running") { stopPoll(); loadStatus(); }
-  }, [stopPoll, loadStatus]);
-
   const startSync = async () => {
-    setStarting(true);
+    stopTick();
+    const started = Date.now();
+    setProgress({
+      ...INITIAL_PROGRESS,
+      status: "running",
+      startedAt: started,
+      phaseLabel: "Verbindung zu HubSpot wird aufgebaut",
+    });
+    tickRef.current = setInterval(() => {
+      setProgress((prev) => prev.status === "running"
+        ? { ...prev, elapsedMs: Date.now() - (prev.startedAt ?? Date.now()) }
+        : prev,
+      );
+    }, 500);
+
     try {
       const types = selectedTypes.join(",");
       const res = await fetch(`/api/hubspot/sync`, {
@@ -2389,24 +2439,48 @@ function HubspotSyncPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ only, types }),
       });
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
         const err = (await res.json().catch(() => ({}))) as { error?: string };
-        alert(err.error ?? `HTTP ${res.status}`);
+        setProgress((prev) => ({ ...prev, status: "error", error: err.error ?? `HTTP ${res.status}` }));
         return;
       }
-      const j = (await res.json()) as HsJob;
-      setJob(j);
-      stopPoll();
-      pollRef.current = setInterval(() => pollJob(j.id), 1500);
-      pollJob(j.id);
-    } finally { setStarting(false); }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let event: Record<string, unknown>;
+          try { event = JSON.parse(trimmed); } catch { continue; }
+          applyEvent(event, setProgress);
+        }
+      }
+      await loadStatus();
+    } catch (err) {
+      setProgress((prev) => ({
+        ...prev,
+        status: "error",
+        error: err instanceof Error ? err.message : "Netzwerkfehler",
+      }));
+    } finally {
+      stopTick();
+      setProgress((prev) => prev.status === "running"
+        ? { ...prev, status: "done" }
+        : prev,
+      );
+    }
   };
 
-  useEffect(() => () => stopPoll(), [stopPoll]);
+  useEffect(() => () => stopTick(), [stopTick]);
 
   if (!status) return null;
-  const running = job?.status === "running";
-
+  const running = progress.status === "running";
   const showTypeFilter = only === "both" || only === "companies";
   const toggleType = (value: string) => {
     setSelectedTypes((prev) =>
@@ -2480,20 +2554,138 @@ function HubspotSyncPanel() {
                   </span>
                 </div>
               )}
-              <button className="btn btn-primary w-full" disabled={starting || running} onClick={startSync}>
-                {starting || running ? (<><span className="spinner" /> Import läuft ...</>) : "Import starten"}
+              <button className="btn btn-primary w-full" disabled={running} onClick={startSync}>
+                {running ? (<><span className="spinner" /> Import läuft ...</>) : "Import starten"}
               </button>
             </div>
           )}
         </div>
       </div>
-      {job && (
-        <div className="scrollbox mono px-5 py-3" style={{ color: "var(--ink-mute)" }}>
-          {job.logs.length === 0
-            ? "Startet ..."
-            : job.logs.slice(-100).map((l, i) => <div key={i}>{l}</div>)}
+      {progress.status !== "idle" && (
+        <SyncProgressPanel progress={progress} wantsCompanies={only === "both" || only === "companies"} wantsContacts={only === "both" || only === "contacts"} />
+      )}
+    </div>
+  );
+}
+
+function SyncProgressPanel({
+  progress, wantsCompanies, wantsContacts,
+}: {
+  progress: SyncProgressState;
+  wantsCompanies: boolean;
+  wantsContacts: boolean;
+}) {
+  const running = progress.status === "running";
+  const done = progress.status === "done";
+  const err = progress.status === "error";
+  const activePhase = progress.phase;
+
+  const companiesActive = activePhase === "companies";
+  const contactsActive = activePhase === "contacts";
+  const companiesDone = wantsCompanies && !companiesActive && (contactsActive || done);
+  const contactsDone = wantsContacts && done;
+
+  return (
+    <div className="px-5 py-4 border-t" style={{ borderColor: "var(--line)" }}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          {running && <span className="spinner" />}
+          {done && <span style={{ color: "var(--good, #15803d)", fontWeight: 600 }}>Fertig</span>}
+          {err && <span style={{ color: "var(--hot)", fontWeight: 600 }}>Fehler</span>}
+          <span className="text-sm" style={{ color: "var(--ink)" }}>
+            {err ? progress.error
+              : done ? "Alle Daten übernommen."
+              : (progress.phaseLabel || "Wird vorbereitet ...")}
+          </span>
+        </div>
+        <div className="mono text-xs" style={{ color: "var(--ink-mute)" }}>
+          Laufzeit <span style={{ color: "var(--ink)" }}>{formatElapsed(progress.elapsedMs)}</span>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-col gap-2">
+        {wantsCompanies && (
+          <SyncStepRow
+            label="Firmen"
+            active={companiesActive}
+            done={companiesDone}
+            count={progress.companiesInserted}
+            countLabel="übernommen"
+            extra={progress.companiesSkipped > 0 ? `${progress.companiesSkipped.toLocaleString("de-DE")} gefiltert` : null}
+          />
+        )}
+        {wantsContacts && (
+          <SyncStepRow
+            label="Kontakte"
+            active={contactsActive}
+            done={contactsDone}
+            count={progress.contactsInserted}
+            countLabel="übernommen"
+            extra={
+              progress.refreshedTargets !== null
+                ? `${progress.refreshedTargets.toLocaleString("de-DE")} Zielfirmen aktualisiert`
+                : null
+            }
+          />
+        )}
+      </div>
+
+      {running && (
+        <div className="mt-3 text-[11px]" style={{ color: "var(--ink-mute)" }}>
+          HubSpot-Pagination 100 Datensätze pro Seite. Große Portals können einige Minuten dauern.
         </div>
       )}
+    </div>
+  );
+}
+
+function SyncStepRow({
+  label, active, done, count, countLabel, extra,
+}: {
+  label: string;
+  active: boolean;
+  done: boolean;
+  count: number;
+  countLabel: string;
+  extra: string | null;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <div
+        className="rounded-full"
+        style={{
+          width: 10, height: 10,
+          background: done ? "var(--good, #15803d)" : active ? "var(--accent, #0a84ff)" : "var(--ink-faint, #999)",
+          boxShadow: active ? "0 0 0 4px rgba(10, 132, 255, 0.18)" : "none",
+          transition: "background 160ms ease, box-shadow 160ms ease",
+        }}
+      />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="text-sm" style={{ color: "var(--ink)", fontWeight: active || done ? 600 : 400 }}>{label}</span>
+          <span className="mono text-xs" style={{ color: "var(--ink-mute)" }}>
+            {count.toLocaleString("de-DE")} {countLabel}
+            {extra ? ` · ${extra}` : ""}
+          </span>
+        </div>
+        <div
+          className="relative rounded-full mt-1 overflow-hidden"
+          style={{ height: 4, background: "rgba(10, 12, 18, 0.06)" }}
+        >
+          <div
+            className={active ? "sync-progress-indeterminate" : ""}
+            style={{
+              position: "absolute",
+              top: 0, bottom: 0,
+              left: 0,
+              width: done ? "100%" : active ? "40%" : "0%",
+              background: done ? "var(--good, #15803d)" : "var(--accent, #0a84ff)",
+              borderRadius: "inherit",
+              transition: "width 220ms ease, background 160ms ease",
+            }}
+          />
+        </div>
+      </div>
     </div>
   );
 }
