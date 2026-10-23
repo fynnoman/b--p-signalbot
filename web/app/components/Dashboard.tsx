@@ -98,17 +98,18 @@ function statusBucket(status: string): "new" | "research" | "planning" | "active
   return "dead";
 }
 function prettySignal(id: string) { return SIGNAL_LABEL[id] ?? id; }
+const DATE_TZ = "Europe/Berlin";
 function formatDate(iso: string | null) {
   if (!iso) return "";
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "short" });
+  return d.toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "short", timeZone: DATE_TZ });
 }
 function formatDateShort(iso: string | null) {
   if (!iso) return "";
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "2-digit" });
+  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "2-digit", timeZone: DATE_TZ });
 }
 function hostFromUrl(url: string) {
   try { return new URL(url).host.replace(/^www\./, ""); }
@@ -828,6 +829,12 @@ function CasesTable({
   variant: TabKey;
   onCompanyClick?: (company: string) => void;
 }) {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
   return (
     <div className="overflow-x-auto">
       <table className="table">
@@ -855,7 +862,7 @@ function CasesTable({
             const isOpen = !!expanded[c.case_id];
             const fillPct = Math.max(0, Math.min(100, c.case_priority));
             const fillTone = scoreFillClass(c.case_class);
-            const reviewDue = c.next_review_at && new Date(c.next_review_at).getTime() < Date.now();
+            const reviewDue = now !== null && c.next_review_at && new Date(c.next_review_at).getTime() < now;
             return (
               <Fragment key={c.case_id}>
                 <tr>
@@ -1088,7 +1095,7 @@ function formatDuration(startIso: string, endIso: string | null) {
 function formatTimeShort(iso: string) {
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: DATE_TZ });
 }
 
 function JobsHistoryPanel({ jobs, onOpen }: { jobs: Job[]; onOpen: (j: Job) => void }) {

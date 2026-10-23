@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { spawn } from "node:child_process";
-import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
+import { syncCompanies, syncContacts } from "@/lib/hubspot-sync";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 type HsJob = {
   id: string;
@@ -26,21 +27,22 @@ function store(): Map<string, HsJob> {
   return global.__hsJobs;
 }
 
-const BOT_DIR = resolvePath(process.cwd(), "..");
-const ENV_FILE = resolvePath(BOT_DIR, ".env");
+const ALLOWED_ONLY = ["all", "both", "companies", "contacts"] as const;
+type OnlyMode = (typeof ALLOWED_ONLY)[number];
 
 export async function POST(request: Request) {
   let body: unknown = {};
   try { if (request.headers.get("content-length")) body = await request.json(); }
   catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
   const b = body as { only?: unknown; types?: unknown };
-  const ALLOWED_ONLY = ["all", "both", "companies", "contacts", "lists", "deals"] as const;
-  const onlyRaw = typeof b.only === "string" ? b.only : "all";
-  if (!ALLOWED_ONLY.includes(onlyRaw as (typeof ALLOWED_ONLY)[number])) {
+  const onlyRaw = typeof b.only === "string" ? b.only : "both";
+  if (!ALLOWED_ONLY.includes(onlyRaw as OnlyMode)) {
     return NextResponse.json({ error: `invalid only (allowed: ${ALLOWED_ONLY.join(", ")})` }, { status: 400 });
   }
-  const only = onlyRaw;
-  const types = typeof b.types === "string" && b.types.trim() ? b.types.trim() : null;
+  const only = onlyRaw as OnlyMode;
+  const typesRaw = typeof b.types === "string" && b.types.trim() ? b.types.trim() : null;
+  const types = typesRaw;
+  const acceptedTypes = typesRaw ? typesRaw.split(",").map((s) => s.trim()).filter(Boolean) : null;
 
   const job: HsJob = {
     id: randomUUID(),
@@ -54,38 +56,34 @@ export async function POST(request: Request) {
     error: null,
   };
   store().set(job.id, job);
-
-  const args = [
-    `--env-file=${ENV_FILE}`,
-    "scripts/hubspot-sync.mjs",
-    `--only=${only}`,
-  ];
-  if (types) args.push(`--types=${types}`);
-
-  const child = spawn(process.execPath, args, { cwd: BOT_DIR, env: process.env });
-  const consume = (buf: Buffer) => {
-    const text = buf.toString("utf8");
-    for (const line of text.split(/\r?\n/)) {
-      const t = line.trim();
-      if (t) job.logs.push(t);
-    }
+  const log = (m: string) => {
+    job.logs.push(m);
     if (job.logs.length > 500) job.logs.splice(0, job.logs.length - 500);
   };
-  child.stdout.on("data", consume);
-  child.stderr.on("data", consume);
-  child.on("error", (err) => {
-    job.status = "error";
-    job.error = err.message;
-    job.ended_at = new Date().toISOString();
-  });
-  child.on("exit", (code) => {
-    job.exit_code = code ?? null;
-    job.ended_at = new Date().toISOString();
-    if (job.status === "running") {
-      job.status = code === 0 ? "done" : "error";
-      if (code !== 0) job.error = `Exit ${code}`;
+
+  try {
+    if (only === "all" || only === "both" || only === "companies") {
+      log(`sync companies${acceptedTypes ? ` (types=${acceptedTypes.join(",")})` : ""}`);
+      const r = await syncCompanies({ acceptedTypes });
+      log(`companies: inserted=${r.inserted} skipped=${r.skipped}`);
     }
-  });
+    if (only === "all" || only === "both" || only === "contacts") {
+      log("sync contacts ...");
+      const r = await syncContacts();
+      log(`contacts: inserted=${r.inserted} refreshed_targets=${r.refreshed_targets}`);
+    }
+    job.status = "done";
+    job.exit_code = 0;
+    job.ended_at = new Date().toISOString();
+    log("fertig");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`FEHLER: ${msg}`);
+    job.status = "error";
+    job.error = msg;
+    job.exit_code = 1;
+    job.ended_at = new Date().toISOString();
+  }
 
   return NextResponse.json(job, { status: 202 });
 }
