@@ -32,11 +32,11 @@ async function main() {
   const only = typeof flags.only === "string" ? flags.only : "all";
   const results = {};
   try {
-    if (only === "all" || only === "companies") {
+    if (only === "all" || only === "both" || only === "companies") {
       console.log("[hubspot] sync companies", acceptedTypes ? `(types=${acceptedTypes.join(",")})` : "");
       results.companies = await syncCompanies({ acceptedTypes });
     }
-    if (only === "all" || only === "contacts") {
+    if (only === "all" || only === "both" || only === "contacts") {
       console.log("[hubspot] sync contacts...");
       results.contacts = await syncContacts();
     }

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
-import { startSingleScan, type JobMode } from "@/lib/jobs";
+import { runSingleScan, type JobMode } from "@/lib/jobs";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   let body: unknown;
@@ -19,8 +21,8 @@ export async function POST(request: Request) {
   const mode: JobMode = b.mode === "broad" ? "broad" : "focused";
 
   try {
-    const job = startSingleScan({ company, limit, mode });
-    return NextResponse.json(job, { status: 202 });
+    const job = await runSingleScan({ company, limit, mode });
+    return NextResponse.json(job);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Unbekannter Fehler" },

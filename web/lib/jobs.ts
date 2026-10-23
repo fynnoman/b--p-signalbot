@@ -1,6 +1,8 @@
-import { spawn } from "node:child_process";
-import { resolve as resolvePath } from "node:path";
+// In-Memory-Jobstore. Scans laufen jetzt in-process (keine Child-Prozesse mehr),
+// damit das Dashboard auch auf Vercel funktioniert.
+
 import { randomUUID } from "node:crypto";
+import { scanCompany } from "./pipeline/scan";
 
 export type JobStatus = "running" | "done" | "error";
 export type JobMode = "focused" | "broad";
@@ -20,10 +22,8 @@ export type Job = {
   exit_code: number | null;
   error: string | null;
   logs: string[];
-  // fuer single
   discovered: number;
   persisted: number;
-  // fuer batch
   total: number;
   processed: number;
   hits: number;
@@ -41,9 +41,7 @@ function store(): Map<string, Job> {
   return global.__jobStore;
 }
 
-const BOT_DIR = resolvePath(process.cwd(), "..");
-const ENV_FILE = resolvePath(BOT_DIR, ".env");
-const MAX_LOG_LINES = 800;
+const MAX_LOG_LINES = 400;
 
 export function listJobs(): Job[] {
   return Array.from(store().values()).sort((a, b) =>
@@ -81,7 +79,19 @@ function newJob(partial: Partial<Job>): Job {
   };
 }
 
-export function startSingleScan(input: { company: string; limit?: number; mode?: JobMode }): Job {
+function pushLog(job: Job, message: string) {
+  job.logs.push(message);
+  if (job.logs.length > MAX_LOG_LINES) {
+    job.logs.splice(0, job.logs.length - MAX_LOG_LINES);
+  }
+}
+
+/**
+ * Fuehrt einen Single-Scan synchron in-process aus. Die Pipeline (fetch + LLM
+ * + persist) laeuft bis zum Hit-Target (2) oder bis alle Strategien durch sind.
+ * Rueckgabe: fertiger Job mit status `done` oder `error`.
+ */
+export async function runSingleScan(input: { company: string; limit?: number; mode?: JobMode }): Promise<Job> {
   const company = input.company.trim();
   if (!company) throw new Error("company fehlt");
   if (company.length > 200) throw new Error("company zu lang");
@@ -97,105 +107,43 @@ export function startSingleScan(input: { company: string; limit?: number; mode?:
   });
   store().set(job.id, job);
 
-  const args = [
-    `--env-file=${ENV_FILE}`,
-    "src/index.js",
-    "scan",
-    company,
-    `--limit=${limit}`,
-    `--mode=${mode}`,
-  ];
-  spawnAndAttach(job, args);
+  try {
+    const result = await scanCompany({ company, limit, mode });
+    for (const entry of result.logs) pushLog(job, entry.message);
+    job.discovered = result.discovered_total;
+    job.processed = result.processed;
+    job.hits = result.hits.length;
+    job.errors = result.errors.length;
+    job.persisted = result.hits.filter((h) => h.case_id !== null).length;
+    job.status = "done";
+    job.exit_code = 0;
+    job.ended_at = new Date().toISOString();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    pushLog(job, `scan-error ${msg}`);
+    job.status = "error";
+    job.error = msg;
+    job.exit_code = 1;
+    job.ended_at = new Date().toISOString();
+  }
   return job;
 }
 
-export function startBatchScan(input: {
+/**
+ * Platzhalter fuer den Batch-Scan. Auf Vercel-Serverless laeuft das wegen
+ * Function-Timeouts nicht sicher durch. Bis zu einem externen Worker /
+ * Queue bleibt der Batch-Scan dem CLI vorbehalten.
+ */
+export async function runBatchScan(_input: {
   limitCompanies?: number | null;
   perCompany?: number;
   mode?: JobMode;
   concurrency?: number;
-}): Job {
-  const limitCompanies = input.limitCompanies == null ? 0 : clampInt(input.limitCompanies, 1, 10000);
-  const perCompany = clampInt(input.perCompany ?? 1, 1, 10);
-  const mode: JobMode = input.mode === "broad" ? "broad" : "focused";
-  const concurrency = clampInt(input.concurrency ?? 5, 1, 20);
-
-  const job = newJob({
-    type: "batch",
-    label:
-      limitCompanies > 0
-        ? `Batch: Top ${limitCompanies} Zielfirmen`
-        : `Batch: alle Zielfirmen`,
-    limit: perCompany,
-    mode,
-    concurrency,
-  });
-  store().set(job.id, job);
-
-  const args = [
-    `--env-file=${ENV_FILE}`,
-    "src/index.js",
-    "scan-batch",
-    `--per-company=${perCompany}`,
-    `--mode=${mode}`,
-    `--concurrency=${concurrency}`,
-  ];
-  if (limitCompanies > 0) args.push(`--limit-companies=${limitCompanies}`);
-  spawnAndAttach(job, args);
-  return job;
-}
-
-function spawnAndAttach(job: Job, args: string[]) {
-  const child = spawn(process.execPath, args, { cwd: BOT_DIR, env: process.env });
-
-  const consume = (buf: Buffer) => {
-    const text = buf.toString("utf8");
-    for (const rawLine of text.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line) continue;
-      job.logs.push(line);
-      // single-scan Zaehler
-      if (line.startsWith("[scan] -> ")) job.discovered += 1;
-      if (line.startsWith("[scan] db-ok")) job.persisted += 1;
-      // batch Zaehler
-      const startMatch = line.match(/^\[batch\] start total=(\d+)/);
-      if (startMatch) job.total = Number(startMatch[1]);
-      const progressMatch = line.match(/^\[batch\] progress=(\d+)\/(\d+) company="(.+)"$/);
-      if (progressMatch) {
-        job.processed = Number(progressMatch[1]);
-        job.total = Number(progressMatch[2]);
-        job.current_company = progressMatch[3];
-      }
-      const statsMatch = line.match(
-        /^\[batch\] stats processed=(\d+) persisted=(\d+) hits=(\d+) errors=(\d+)/,
-      );
-      if (statsMatch) {
-        job.processed = Number(statsMatch[1]);
-        job.persisted = Number(statsMatch[2]);
-        job.hits = Number(statsMatch[3]);
-        job.errors = Number(statsMatch[4]);
-      }
-    }
-    if (job.logs.length > MAX_LOG_LINES) {
-      job.logs.splice(0, job.logs.length - MAX_LOG_LINES);
-    }
-  };
-
-  child.stderr.on("data", consume);
-  child.stdout.on("data", () => {});
-  child.on("error", (err) => {
-    job.status = "error";
-    job.error = err.message;
-    job.ended_at = new Date().toISOString();
-  });
-  child.on("exit", (code) => {
-    job.exit_code = code ?? null;
-    job.ended_at = new Date().toISOString();
-    if (job.status === "running") {
-      job.status = code === 0 ? "done" : "error";
-      if (code !== 0) job.error = `Bot beendet mit Exit-Code ${code}`;
-    }
-  });
+}): Promise<never> {
+  throw new Error(
+    "Batch-Scan ist in der aktuellen Deployment-Umgebung nicht verfuegbar. " +
+      "Bitte lokal ausfuehren: `node --env-file=.env src/index.js scan-batch`.",
+  );
 }
 
 function clampInt(value: unknown, min: number, max: number): number {

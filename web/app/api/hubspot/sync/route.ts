@@ -34,7 +34,7 @@ export async function POST(request: Request) {
   try { if (request.headers.get("content-length")) body = await request.json(); }
   catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
   const b = body as { only?: unknown; types?: unknown };
-  const ALLOWED_ONLY = ["all", "companies", "contacts", "lists", "deals"] as const;
+  const ALLOWED_ONLY = ["all", "both", "companies", "contacts", "lists", "deals"] as const;
   const onlyRaw = typeof b.only === "string" ? b.only : "all";
   if (!ALLOWED_ONLY.includes(onlyRaw as (typeof ALLOWED_ONLY)[number])) {
     return NextResponse.json({ error: `invalid only (allowed: ${ALLOWED_ONLY.join(", ")})` }, { status: 400 });

@@ -316,24 +316,28 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; id?: string } & Partial<Job>;
       if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { error?: string };
-        setBatchError(err.error ?? `HTTP ${res.status}`);
+        setBatchError(data.error ?? `HTTP ${res.status}`);
         return;
       }
-      const job = (await res.json()) as Job;
+      const job = data as Job;
       stopPolling();
       activeJobIdRef.current = job.id;
       setActiveJob(job);
       setShowBatch(false);
-      pollRef.current = setInterval(() => pollJob(job.id), 2000);
-      pollJob(job.id);
+      if (job.status === "running") {
+        pollRef.current = setInterval(() => pollJob(job.id), 2000);
+        pollJob(job.id);
+      } else {
+        await reload();
+      }
     } catch (err) {
       setBatchError(err instanceof Error ? err.message : "Fehler beim Start.");
     } finally {
       setBatchSubmitting(false);
     }
-  }, [batchLimit, batchPer, batchMode, batchConcurrency, pollJob, stopPolling]);
+  }, [batchLimit, batchPer, batchMode, batchConcurrency, pollJob, stopPolling, reload]);
 
   const submitSingle = useCallback(async () => {
     setSingleError(null);
@@ -356,8 +360,21 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
       setActiveJob(job);
       setShowSingle(false);
       setSingleCompany("");
-      pollRef.current = setInterval(() => pollJob(job.id), 1500);
-      pollJob(job.id);
+      if (job.status === "running") {
+        pollRef.current = setInterval(() => pollJob(job.id), 1500);
+        pollJob(job.id);
+      } else {
+        await reload();
+        if (job.type === "single" && job.company) {
+          try {
+            const cRes = await fetch(`/api/companies/lookup?name=${encodeURIComponent(job.company)}`);
+            if (cRes.ok) {
+              const data = (await cRes.json()) as { contacts: ContactRow[] };
+              setJobContacts(data.contacts);
+            }
+          } catch {}
+        }
+      }
     } catch (err) {
       setSingleError(err instanceof Error ? err.message : "Fehler beim Start.");
     } finally {
@@ -2313,11 +2330,15 @@ type HsJob = {
   error: string | null;
 };
 
+type HubspotCompanyTypeOption = { label: string; value: string };
+
 function HubspotSyncPanel() {
   const [status, setStatus] = useState<HsStatus | null>(null);
   const [job, setJob] = useState<HsJob | null>(null);
-  const [only, setOnly] = useState<string>("all");
-  const [types, setTypes] = useState<string>("Kunde,nicht aktiver Kunde");
+  const [only, setOnly] = useState<"both" | "companies" | "contacts">("both");
+  const [selectedTypes, setSelectedTypes] = useState<string[]>(["Kunde", "nicht aktiver Kunde"]);
+  const [typeOptions, setTypeOptions] = useState<HubspotCompanyTypeOption[]>([]);
+  const [typeOptionsError, setTypeOptionsError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -2326,7 +2347,19 @@ function HubspotSyncPanel() {
     if (res.ok) setStatus(await res.json());
   }, []);
 
+  const loadTypeOptions = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/hubspot/company-types`, { cache: "no-store" });
+      const data = (await res.json()) as { options: HubspotCompanyTypeOption[]; error?: string };
+      setTypeOptions(data.options ?? []);
+      setTypeOptionsError(res.ok ? null : (data.error ?? `HTTP ${res.status}`));
+    } catch (err) {
+      setTypeOptionsError(err instanceof Error ? err.message : "Fehler");
+    }
+  }, []);
+
   useEffect(() => { loadStatus(); }, [loadStatus]);
+  useEffect(() => { loadTypeOptions(); }, [loadTypeOptions]);
 
   const stopPoll = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -2343,6 +2376,7 @@ function HubspotSyncPanel() {
   const startSync = async () => {
     setStarting(true);
     try {
+      const types = selectedTypes.join(",");
       const res = await fetch(`/api/hubspot/sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2366,7 +2400,12 @@ function HubspotSyncPanel() {
   if (!status) return null;
   const running = job?.status === "running";
 
-  const showTypeFilter = only === "all" || only === "companies";
+  const showTypeFilter = only === "both" || only === "companies";
+  const toggleType = (value: string) => {
+    setSelectedTypes((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  };
   return (
     <div className="panel">
       <div className="px-5 py-4 border-b" style={{ borderColor: "var(--line)" }}>
@@ -2374,15 +2413,13 @@ function HubspotSyncPanel() {
           <div>
             <div className="eyebrow">Schritt 1 · HubSpot-Daten holen</div>
             <div className="text-sm mt-1" style={{ maxWidth: 560 }}>
-              Holt die aktuellen Firmen, Kontakte, Listen und Deals aus HubSpot in die Datenbank des Radars.
+              Holt die aktuellen Firmen und Kontakte aus HubSpot in die Datenbank des Radars.
               <span style={{ color: "var(--ink-mute)" }}> Es wird nichts nach HubSpot zurückgeschrieben.</span>
             </div>
             {status.token_present ? (
               <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs" style={{ color: "var(--ink-mute)" }}>
                 <span>Firmen <span className="mono" style={{ color: "var(--ink)" }}>{status.companies.n.toLocaleString("de-DE")}</span></span>
                 <span>Kontakte <span className="mono" style={{ color: "var(--ink)" }}>{status.contacts.n.toLocaleString("de-DE")}</span></span>
-                <span>Listen <span className="mono" style={{ color: "var(--ink)" }}>{status.lists.n.toLocaleString("de-DE")}</span></span>
-                <span>Deals <span className="mono" style={{ color: "var(--ink)" }}>{status.deals.n.toLocaleString("de-DE")}</span></span>
                 {status.contacts.last && (
                   <span>Zuletzt aktualisiert <span className="mono" style={{ color: "var(--ink)" }}>{formatDateShort(status.contacts.last)}</span></span>
                 )}
@@ -2397,27 +2434,44 @@ function HubspotSyncPanel() {
             <div className="flex flex-col items-end gap-2" style={{ minWidth: 280 }}>
               <label className="block w-full">
                 <span className="eyebrow">Was holen?</span>
-                <select className="select mt-1 w-full text-sm" value={only} onChange={(e) => setOnly(e.target.value)}>
-                  <option value="all">Alles: Firmen, Kontakte, Listen, Deals</option>
+                <select
+                  className="select mt-1 w-full text-sm"
+                  value={only}
+                  onChange={(e) => setOnly(e.target.value as "both" | "companies" | "contacts")}
+                >
+                  <option value="both">Firmen und Kontakte</option>
                   <option value="companies">Nur Firmen</option>
                   <option value="contacts">Nur Kontakte</option>
-                  <option value="lists">Nur Listen (Segmente)</option>
-                  <option value="deals">Nur Deals</option>
                 </select>
               </label>
               {showTypeFilter && (
-                <label className="block w-full">
+                <div className="block w-full">
                   <span className="eyebrow">Nur diese Firmen-Typen (optional)</span>
-                  <input
-                    className="input mt-1 w-full text-sm"
-                    placeholder="z. B. Kunde, nicht aktiver Kunde"
-                    value={types}
-                    onChange={(e) => setTypes(e.target.value)}
-                  />
+                  <div
+                    className="mt-1 w-full rounded-md border p-2 flex flex-col gap-1 text-sm"
+                    style={{ borderColor: "var(--line)", background: "var(--surface, transparent)", maxHeight: 180, overflowY: "auto" }}
+                  >
+                    {typeOptions.length === 0 ? (
+                      <span className="text-[11px]" style={{ color: "var(--ink-mute)" }}>
+                        {typeOptionsError ?? "HubSpot-Firmentypen werden geladen ..."}
+                      </span>
+                    ) : (
+                      typeOptions.map((opt) => (
+                        <label key={opt.value} className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedTypes.includes(opt.value)}
+                            onChange={() => toggleType(opt.value)}
+                          />
+                          <span>{opt.label}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
                   <span className="block text-[11px] mt-1" style={{ color: "var(--ink-mute)" }}>
-                    Kommagetrennt. Filter greift auf das HubSpot-Feld „Firmentyp". Leer lassen, um alle zu holen.
+                    Filter greift auf das HubSpot-Feld „Firmentyp". Nichts auswählen = alle Firmen holen.
                   </span>
-                </label>
+                </div>
               )}
               <button className="btn btn-primary w-full" disabled={starting || running} onClick={startSync}>
                 {starting || running ? (<><span className="spinner" /> Import läuft ...</>) : "Import starten"}
