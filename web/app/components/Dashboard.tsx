@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
@@ -10,113 +10,22 @@ import type {
 import { CASE_STATUSES, CASE_STATUS_LABEL_DE } from "@/lib/case-status";
 import type { Job } from "@/lib/jobs";
 
-type UsageTotal = { prompt: number; completion: number; tokens: number; cost_usd: number; cases: number };
-type UsageByModel = { model: string | null; total_prompt_tokens: number; total_completion_tokens: number; total_tokens: number; cases_with_llm: number; cost_usd: number | null };
-type UsagePayload = { by_model: UsageByModel[]; total: UsageTotal };
+import type {
+  UsagePayload, TabKey, TabGroup, TargetsInfo, DashboardContextValue,
+  Campaign, HsStatus, HubspotCompanyTypeOption, SyncProgressState, SourceRow,
+} from "./dashboard/types";
+import {
+  TAB_TO_URL, URL_TO_TAB, GROUP_LABEL, TABS,
+  INITIAL_PROGRESS, CAMPAIGN_KINDS, CAMPAIGN_STATUSES, SIGNAL_OPTIONS, CASE_CLASS_OPTIONS,
+} from "./dashboard/constants";
+import {
+  useDebouncedValue, classChip, signalKey, statusBucket, prettySignal,
+  formatDate, formatDateShort, hostFromUrl, formatDuration, formatTimeShort, formatElapsed,
+  applyEvent, scoreFillClass, timelineToneForClass, filterByCompany,
+} from "./dashboard/utils";
+import { DashboardContext, useDashboard } from "./dashboard/context";
 
-function useDebouncedValue<T>(value: T, delayMs = 300): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(t);
-  }, [value, delayMs]);
-  return debounced;
-}
-
-const SIGNAL_LABEL: Record<string, string> = {
-  C_LEVEL_DEPARTURE: "Konkreter Besetzungsanlass",
-  PE_TRANSACTION: "Eigentümerwechsel / PE",
-  RESTRUCTURING: "Restrukturierung / Krise",
-};
-
-type TabKey = "hot" | "emerging" | "watchlist" | "companies" | "hubspot" | "campaigns";
-type TabGroup = "faelle" | "stamm" | "konfig";
-
-const TAB_TO_URL: Record<TabKey, string> = {
-  hot:         "/hot",
-  emerging:    "/auffaellig",
-  watchlist:   "/beobachten",
-  companies:   "/zielunternehmen",
-  hubspot:     "/kontakte",
-  campaigns:   "/kampagnen",
-};
-const URL_TO_TAB: Record<string, TabKey> = Object.fromEntries(
-  Object.entries(TAB_TO_URL).map(([k, v]) => [v, k as TabKey])
-) as Record<string, TabKey>;
-export { TAB_TO_URL, URL_TO_TAB };
-export type { TabKey };
-const GROUP_LABEL: Record<TabGroup, string> = {
-  faelle: "Fälle",
-  stamm:  "Stammdaten",
-  konfig: "Konfiguration",
-};
-const TABS: { key: TabKey; label: string; hint: string; group: TabGroup }[] = [
-  { key: "hot",         label: "Heisse Fälle",     group: "faelle",
-    hint: "Priorisierte Fälle mit klarem Anlass. Hier stehen die spannendsten Mandate zuerst." },
-  { key: "emerging",    label: "Auffällige Firmen", group: "faelle",
-    hint: "Firmen, bei denen mehrere Nachrichten zusammenspielen und ein Muster ergeben." },
-  { key: "watchlist",   label: "Beobachten",        group: "faelle",
-    hint: "Firmen mit mittleren Signalen. Noch kein heisser Fall, aber lohnt sich im Blick zu behalten." },
-  { key: "companies",   label: "Zielunternehmen",   group: "stamm",
-    hint: "Die Firmen, die bei jedem Scan durchsucht werden. Hier hinzufügen, deaktivieren oder entfernen." },
-  { key: "hubspot",     label: "Kontakte",          group: "stamm",
-    hint: "Alle Kontakte aus HubSpot, gruppiert nach Firma. Rohdaten, kein Fall." },
-  { key: "campaigns",   label: "Kampagnen",         group: "konfig",
-    hint: "Ansprache-Aktionen und Themen-Sprints. Filtern Fälle nach Signal-Typ und Klasse." },
-];
-
-function classChip(cls: string) {
-  const key = cls.toLowerCase();
-  if (key === "hot") return "chip chip-hot";
-  if (key === "warm") return "chip chip-warm";
-  if (key === "watchlist") return "chip chip-watch";
-  return "chip chip-archiv";
-}
-function classDotClass(cls: string) {
-  const key = cls.toLowerCase();
-  if (key === "hot") return "dot-hot";
-  if (key === "warm") return "dot-warm-cls";
-  if (key === "watchlist") return "dot-watch";
-  return "dot-archiv";
-}
-function signalKey(id: string | null | undefined): string | null {
-  if (!id) return null;
-  switch (id) {
-    case "C_LEVEL_DEPARTURE": return "clevel";
-    case "PE_TRANSACTION": return "pe";
-    case "RESTRUCTURING": return "restr";
-    default: return null;
-  }
-}
-function statusBucket(status: string): "new" | "research" | "planning" | "active" | "won" | "dead" {
-  const s = (status ?? "").toLowerCase();
-  if (s === "new") return "new";
-  if (s === "research required" || s === "watchlist" || s === "qualified") return "research";
-  if (s === "partner review" || s === "contact planned") return "planning";
-  if (s === "contacted" || s === "conversation" || s === "mandate potential" || s === "deal created") return "active";
-  if (s === "won") return "won";
-  return "dead";
-}
-function prettySignal(id: string) { return SIGNAL_LABEL[id] ?? id; }
-const DATE_TZ = "Europe/Berlin";
-function formatDate(iso: string | null) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "short", timeZone: DATE_TZ });
-}
-function formatDateShort(iso: string | null) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "2-digit", timeZone: DATE_TZ });
-}
-function hostFromUrl(url: string) {
-  try { return new URL(url).host.replace(/^www\./, ""); }
-  catch { return url; }
-}
-
-type TargetsInfo = { total: number; scanned: number; last_scan: string | null };
+export { useDashboard };
 
 type Props = {
   initialCases: CaseRow[];
@@ -125,27 +34,6 @@ type Props = {
   initialEmerging: EmergingCompanyRow[];
   children?: React.ReactNode;
 };
-
-type DashboardContextValue = {
-  cases: CaseRow[];
-  emerging: EmergingCompanyRow[];
-  companyFilter: string;
-  expanded: Record<number, SignalRow[] | "loading" | undefined>;
-  toggleExpand: (id: number) => void;
-  patchCase: (id: number, patch: Record<string, unknown>) => void;
-  openDossier: (name: string) => void;
-  setCampaignCount: (n: number) => void;
-  hubspotQuery: string;
-  setHubspotQuery: (q: string) => void;
-};
-
-const DashboardContext = createContext<DashboardContextValue | null>(null);
-
-export function useDashboard(): DashboardContextValue {
-  const v = useContext(DashboardContext);
-  if (!v) throw new Error("useDashboard must be used inside <Dashboard>");
-  return v;
-}
 
 export default function Dashboard({ initialCases, initialStats, initialTargets, initialEmerging, children }: Props) {
   const pathname = usePathname();
@@ -892,14 +780,6 @@ function Kpi({ label, value, tone, sub, onClick }: { label: string; value: numbe
   );
 }
 
-function scoreFillClass(cls: string) {
-  const k = cls.toLowerCase();
-  if (k === "hot") return "hot";
-  if (k === "warm") return "warm";
-  if (k === "watchlist") return "watch";
-  return "archiv";
-}
-
 function CasesTable({
   rows, expanded, onToggle, onPatch, variant, onCompanyClick,
 }: {
@@ -1161,24 +1041,6 @@ function EmergingTable({ rows, onCompanyClick }: { rows: EmergingCompanyRow[]; o
   );
 }
 
-function formatDuration(startIso: string, endIso: string | null) {
-  const start = new Date(startIso).getTime();
-  const end = endIso ? new Date(endIso).getTime() : Date.now();
-  const s = Math.max(0, Math.round((end - start) / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const rest = s % 60;
-  if (m < 60) return `${m}m ${rest.toString().padStart(2, "0")}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${(m % 60).toString().padStart(2, "0")}m`;
-}
-
-function formatTimeShort(iso: string) {
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: DATE_TZ });
-}
-
 function JobsHistoryPanel({ jobs, onOpen }: { jobs: Job[]; onOpen: (j: Job) => void }) {
   const [open, setOpen] = useState(false);
   if (jobs.length === 0) return null;
@@ -1280,14 +1142,6 @@ function JobPanel({ job, onDismiss }: { job: Job; onDismiss: () => void }) {
       </div>
     </div>
   );
-}
-
-function timelineToneForClass(cls: string) {
-  const k = cls.toLowerCase();
-  if (k === "hot") return "hot";
-  if (k === "warm") return "warm";
-  if (k === "watchlist") return "watch";
-  return "muted";
 }
 
 function CaseDetails({
@@ -2160,39 +2014,6 @@ function CompaniesTab() {
   );
 }
 
-type Campaign = {
-  id: number;
-  name: string;
-  description: string | null;
-  kind: string;
-  status: string;
-  start_date: string | null;
-  end_date: string | null;
-  assigned_to: string | null;
-  filter_signal_ids: string[];
-  filter_case_class: string[];
-  hubspot_list_id: string | null;
-  hubspot_campaign_id: string | null;
-  notes: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-const CAMPAIGN_KINDS = [
-  { value: "outreach",  label: "Direktansprache" },
-  { value: "email",     label: "E-Mail-Kampagne" },
-  { value: "event",     label: "Event / Veranstaltung" },
-  { value: "content",   label: "Content / Landingpage" },
-  { value: "sonstiges", label: "Sonstiges" },
-];
-const CAMPAIGN_STATUSES = ["Entwurf", "Aktiv", "Pausiert", "Abgeschlossen", "Abgebrochen"];
-const SIGNAL_OPTIONS = [
-  { id: "C_LEVEL_DEPARTURE", label: "Konkreter Besetzungsanlass" },
-  { id: "PE_TRANSACTION",    label: "Eigentümerwechsel / PE" },
-  { id: "RESTRUCTURING",     label: "Restrukturierung / Krise" },
-];
-const CASE_CLASS_OPTIONS = ["Hot", "Warm", "Watchlist", "Archiv"];
-
 function CampaignsTab({ onCountChange }: { onCountChange: (n: number) => void }) {
   const [rows, setRows] = useState<Campaign[]>([]);
   const [editing, setEditing] = useState<Campaign | null>(null);
@@ -2456,72 +2277,6 @@ function CampaignDialog({
       </div>
     </div>
   );
-}
-
-type HsStatus = {
-  token_present: boolean;
-  companies: { n: number; last: string | null };
-  contacts:  { n: number; last: string | null };
-  deals:     { n: number; last: string | null };
-  lists:     { n: number; last: string | null };
-};
-
-type HubspotCompanyTypeOption = { label: string; value: string };
-type SyncPhase = "companies" | "contacts";
-type SyncProgressState = {
-  phase: SyncPhase | null;
-  phaseLabel: string;
-  companiesInserted: number;
-  companiesSkipped: number;
-  contactsInserted: number;
-  refreshedTargets: number | null;
-  startedAt: number | null;
-  elapsedMs: number;
-  status: "idle" | "running" | "done" | "error";
-  error: string | null;
-};
-
-const INITIAL_PROGRESS: SyncProgressState = {
-  phase: null, phaseLabel: "",
-  companiesInserted: 0, companiesSkipped: 0,
-  contactsInserted: 0, refreshedTargets: null,
-  startedAt: null, elapsedMs: 0,
-  status: "idle", error: null,
-};
-
-function formatElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const rest = (s % 60).toString().padStart(2, "0");
-  return `${m}:${rest} min`;
-}
-
-function applyEvent(event: Record<string, unknown>, setProgress: React.Dispatch<React.SetStateAction<SyncProgressState>>) {
-  const type = event.type as string | undefined;
-  if (type === "phase") {
-    setProgress((prev) => ({
-      ...prev,
-      phase: event.phase as SyncPhase,
-      phaseLabel: (event.label as string | undefined) ?? "",
-    }));
-  } else if (type === "progress") {
-    const phase = event.phase as SyncPhase;
-    setProgress((prev) => phase === "companies"
-      ? { ...prev, phase, companiesInserted: (event.inserted as number) ?? prev.companiesInserted, companiesSkipped: (event.skipped as number) ?? prev.companiesSkipped }
-      : { ...prev, phase, contactsInserted: (event.inserted as number) ?? prev.contactsInserted },
-    );
-  } else if (type === "phase_done") {
-    const phase = event.phase as SyncPhase;
-    setProgress((prev) => phase === "companies"
-      ? { ...prev, companiesInserted: (event.inserted as number) ?? prev.companiesInserted, companiesSkipped: (event.skipped as number) ?? prev.companiesSkipped }
-      : { ...prev, contactsInserted: (event.inserted as number) ?? prev.contactsInserted, refreshedTargets: (event.refreshed_targets as number | null | undefined) ?? prev.refreshedTargets },
-    );
-  } else if (type === "done") {
-    setProgress((prev) => ({ ...prev, status: "done", phase: null, phaseLabel: "" }));
-  } else if (type === "error") {
-    setProgress((prev) => ({ ...prev, status: "error", error: (event.message as string | undefined) ?? "Fehler" }));
-  }
 }
 
 function HubspotSyncPanel() {
@@ -2830,23 +2585,6 @@ function SyncStepRow({
   );
 }
 
-type SourceRow = {
-  id: number;
-  url: string;
-  title: string | null;
-  publisher: string | null;
-  published_at: string | null;
-  fetched_at: string;
-  language: string | null;
-  source_quality: number | null;
-  discovered_via: string;
-  company: string | null;
-  case_class: string | null;
-  case_priority: number | null;
-  case_id: number | null;
-  no_signal_found: boolean | null;
-};
-
 function SourcesModal({ onClose }: { onClose: () => void }) {
   const [rows, setRows] = useState<SourceRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -3034,12 +2772,6 @@ function HubspotTable({
 }
 
 /* ---------- Body-Views (jeweils eigene Route) ---------- */
-
-function filterByCompany<T extends { company: string }>(rows: T[], q: string): T[] {
-  const s = q.trim().toLowerCase();
-  if (!s) return rows;
-  return rows.filter((r) => r.company.toLowerCase().includes(s));
-}
 
 export function HotView() {
   const ctx = useDashboard();
