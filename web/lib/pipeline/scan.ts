@@ -31,6 +31,15 @@ export type ScanResult = {
   persisted: boolean;
 };
 
+export type ScanEvent =
+  | { type: "strategy_start"; strategy: string }
+  | { type: "strategy_discovered"; strategy: string; count: number }
+  | { type: "strategy_done"; strategy: string }
+  | { type: "pipe_start"; url: string }
+  | { type: "pipe_done"; url: string; hit: boolean; case_id: number | null; signals: number }
+  | { type: "pipe_error"; url: string; message: string }
+  | { type: "log"; message: string };
+
 export async function scanCompany(input: {
   company: string;
   limit?: number;
@@ -38,6 +47,7 @@ export async function scanCompany(input: {
   maxAgeMonths?: number;
   hitTarget?: number;
   persist?: boolean;
+  onEvent?: (event: ScanEvent) => void;
 }): Promise<ScanResult> {
   const company = input.company.trim();
   if (!company) throw new Error("company fehlt");
@@ -59,7 +69,11 @@ export async function scanCompany(input: {
   }
 
   const logs: ScanLogEntry[] = [];
-  const log = (message: string) => logs.push({ ts: new Date().toISOString(), message });
+  const emit = input.onEvent;
+  const log = (message: string) => {
+    logs.push({ ts: new Date().toISOString(), message });
+    emit?.({ type: "log", message });
+  };
 
   const seen = new Set<string>();
   const hits: ScanHit[] = [];
@@ -74,6 +88,7 @@ export async function scanCompany(input: {
       break;
     }
     strategiesRun.push(strat.name);
+    emit?.({ type: "strategy_start", strategy: strat.name });
     log(`Strategie ${strat.name} start`);
 
     let discovery;
@@ -82,9 +97,11 @@ export async function scanCompany(input: {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`Strategie ${strat.name} discover-error: ${msg}`);
+      emit?.({ type: "strategy_done", strategy: strat.name });
       continue;
     }
     discoveredTotal += discovery.total;
+    emit?.({ type: "strategy_discovered", strategy: strat.name, count: discovery.total });
     log(`Strategie ${strat.name} candidates=${discovery.total}`);
 
     for (const candidate of discovery.candidates) {
@@ -93,6 +110,7 @@ export async function scanCompany(input: {
       if (!url || seen.has(url)) continue;
       seen.add(url);
       processed += 1;
+      emit?.({ type: "pipe_start", url });
       log(`-> ${url}`);
       try {
         const result = await runPipeline({ url, companyHint: company });
@@ -110,15 +128,19 @@ export async function scanCompany(input: {
             log(`db-error ${msg}`);
           }
         }
-        if (!result.extraction.no_signal_found) {
+        const isHit = !result.extraction.no_signal_found;
+        if (isHit) {
           hits.push(buildHit(strat.name, candidate, result, caseId));
         }
+        emit?.({ type: "pipe_done", url, hit: isHit, case_id: caseId, signals: result.signals.length });
       } catch (pipeErr) {
         const msg = pipeErr instanceof Error ? pipeErr.message : String(pipeErr);
         log(`pipe-error ${msg}`);
         errors.push({ url, message: msg });
+        emit?.({ type: "pipe_error", url, message: msg });
       }
     }
+    emit?.({ type: "strategy_done", strategy: strat.name });
   }
 
   return {

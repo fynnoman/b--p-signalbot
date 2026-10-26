@@ -2,7 +2,7 @@
 // damit das Dashboard auch auf Vercel funktioniert.
 
 import { randomUUID } from "node:crypto";
-import { scanCompany } from "./pipeline/scan";
+import { scanCompany, type ScanEvent } from "./pipeline/scan";
 
 export type JobStatus = "running" | "done" | "error";
 export type JobMode = "focused" | "broad";
@@ -91,7 +91,12 @@ function pushLog(job: Job, message: string) {
  * + persist) laeuft bis zum Hit-Target (2) oder bis alle Strategien durch sind.
  * Rueckgabe: fertiger Job mit status `done` oder `error`.
  */
-export async function runSingleScan(input: { company: string; limit?: number; mode?: JobMode }): Promise<Job> {
+export async function runSingleScan(input: {
+  company: string;
+  limit?: number;
+  mode?: JobMode;
+  onEvent?: (event: ScanEvent) => void;
+}): Promise<Job> {
   const company = input.company.trim();
   if (!company) throw new Error("company fehlt");
   if (company.length > 200) throw new Error("company zu lang");
@@ -108,8 +113,22 @@ export async function runSingleScan(input: { company: string; limit?: number; mo
   store().set(job.id, job);
 
   try {
-    const result = await scanCompany({ company, limit, mode });
-    for (const entry of result.logs) pushLog(job, entry.message);
+    const result = await scanCompany({
+      company, limit, mode,
+      onEvent: input.onEvent
+        ? (ev) => {
+            if (ev.type === "log") pushLog(job, ev.message);
+            if (ev.type === "pipe_start") job.processed += 1;
+            if (ev.type === "pipe_done") {
+              if (ev.hit) job.hits += 1;
+              if (ev.case_id !== null) job.persisted += 1;
+            }
+            if (ev.type === "pipe_error") job.errors += 1;
+            input.onEvent!(ev);
+          }
+        : undefined,
+    });
+    if (!input.onEvent) for (const entry of result.logs) pushLog(job, entry.message);
     job.discovered = result.discovered_total;
     job.processed = result.processed;
     job.hits = result.hits.length;

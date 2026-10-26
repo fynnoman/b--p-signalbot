@@ -189,30 +189,42 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
 
   const [jobHistory, setJobHistory] = useState<Job[]>([]);
 
-  const reload = useCallback(async () => {
-    const [casesRes, targetsRes, emergingRes, usageRes, jobsRes] = await Promise.all([
-      fetch(`/api/cases`, { cache: "no-store" }),
-      fetch(`/api/targets`, { cache: "no-store" }),
-      fetch(`/api/emerging`, { cache: "no-store" }),
-      fetch(`/api/usage`, { cache: "no-store" }),
-      fetch(`/api/jobs`, { cache: "no-store" }),
-    ]);
-    if (casesRes.ok) {
-      const data = (await casesRes.json()) as { cases: CaseRow[]; stats: StatsRow };
-      setCases(data.cases);
-      setStats(data.stats);
-    }
-    if (targetsRes.ok) setTargets(await targetsRes.json());
-    if (emergingRes.ok) {
-      const data = (await emergingRes.json()) as { companies: EmergingCompanyRow[] };
-      setEmerging(data.companies);
-    }
-    if (usageRes.ok) setUsage(await usageRes.json());
-    if (jobsRes.ok) {
-      const data = (await jobsRes.json()) as { jobs: Job[] };
-      setJobHistory(data.jobs);
-    }
+  const reloadCases = useCallback(async () => {
+    const res = await fetch(`/api/cases`, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = (await res.json()) as { cases: CaseRow[]; stats: StatsRow };
+    setCases(data.cases);
+    setStats(data.stats);
   }, []);
+  const reloadTargets = useCallback(async () => {
+    const res = await fetch(`/api/targets`, { cache: "no-store" });
+    if (res.ok) setTargets(await res.json());
+  }, []);
+  const reloadEmerging = useCallback(async () => {
+    const res = await fetch(`/api/emerging`, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = (await res.json()) as { companies: EmergingCompanyRow[] };
+    setEmerging(data.companies);
+  }, []);
+  const reloadUsage = useCallback(async () => {
+    const res = await fetch(`/api/usage`, { cache: "no-store" });
+    if (res.ok) setUsage(await res.json());
+  }, []);
+  const reloadJobs = useCallback(async () => {
+    const res = await fetch(`/api/jobs`, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = (await res.json()) as { jobs: Job[] };
+    setJobHistory(data.jobs);
+  }, []);
+  const reload = useCallback(async () => {
+    await Promise.all([
+      reloadCases(),
+      reloadTargets(),
+      reloadEmerging(),
+      reloadUsage(),
+      reloadJobs(),
+    ]);
+  }, [reloadCases, reloadTargets, reloadEmerging, reloadUsage, reloadJobs]);
 
   useEffect(() => {
     (async () => {
@@ -268,9 +280,9 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
         body: JSON.stringify(patch),
       });
     } catch {
-      reload();
+      reloadCases();
     }
-  }, [reload]);
+  }, [reloadCases]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -298,9 +310,11 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
             }
           } catch {}
         }
-      } else if (job.type === "batch" && job.processed > 0 && job.processed % 5 === 0) reload();
+      } else if (job.type === "batch" && job.processed > 0 && job.processed % 5 === 0) {
+        Promise.all([reloadCases(), reloadEmerging()]).catch(() => {});
+      }
     } catch {}
-  }, [stopPolling, reload]);
+  }, [stopPolling, reload, reloadCases, reloadEmerging]);
 
   const submitBatch = useCallback(async () => {
     setBatchError(null);
@@ -342,33 +356,98 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
 
   const submitSingle = useCallback(async () => {
     setSingleError(null);
-    if (!singleCompany.trim()) { setSingleError("Firmenname fehlt."); return; }
+    const company = singleCompany.trim();
+    if (!company) { setSingleError("Firmenname fehlt."); return; }
     setSingleSubmitting(true);
+    stopPolling();
+    const placeholder: Job = {
+      id: "pending",
+      type: "single",
+      label: `Einzel-Scan: ${company}`,
+      company,
+      limit: singleLimit,
+      mode: singleMode,
+      concurrency: 1,
+      status: "running",
+      started_at: new Date().toISOString(),
+      ended_at: null,
+      exit_code: null,
+      error: null,
+      logs: [],
+      discovered: 0,
+      persisted: 0,
+      total: 0,
+      processed: 0,
+      hits: 0,
+      errors: 0,
+      current_company: company,
+    };
+    setActiveJob(placeholder);
+    setJobContacts(null);
+    setShowSingle(false);
+    setSingleCompany("");
+
     try {
       const res = await fetch("/api/scan", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ company: singleCompany.trim(), limit: singleLimit, mode: singleMode }),
+        headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+        body: JSON.stringify({ company, limit: singleLimit, mode: singleMode, stream: true }),
       });
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
         const err = (await res.json().catch(() => ({}))) as { error?: string };
         setSingleError(err.error ?? `HTTP ${res.status}`);
+        setActiveJob((prev) => prev ? { ...prev, status: "error", error: err.error ?? `HTTP ${res.status}`, ended_at: new Date().toISOString() } : prev);
         return;
       }
-      const job = (await res.json()) as Job;
-      stopPolling();
-      activeJobIdRef.current = job.id;
-      setActiveJob(job);
-      setShowSingle(false);
-      setSingleCompany("");
-      if (job.status === "running") {
-        pollRef.current = setInterval(() => pollJob(job.id), 1500);
-        pollJob(job.id);
-      } else {
-        await reload();
-        if (job.type === "single" && job.company) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalJob: Job | null = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let ev: Record<string, unknown>;
+          try { ev = JSON.parse(trimmed); } catch { continue; }
+          const type = ev.type as string;
+          if (type === "log") {
+            const message = String(ev.message ?? "");
+            setActiveJob((prev) => prev ? { ...prev, logs: [...prev.logs, message].slice(-400) } : prev);
+          } else if (type === "pipe_start") {
+            setActiveJob((prev) => prev ? { ...prev, processed: prev.processed + 1 } : prev);
+          } else if (type === "pipe_done") {
+            const hit = ev.hit === true;
+            const caseId = ev.case_id as number | null;
+            setActiveJob((prev) => prev ? {
+              ...prev,
+              hits: prev.hits + (hit ? 1 : 0),
+              persisted: prev.persisted + (caseId !== null ? 1 : 0),
+            } : prev);
+          } else if (type === "pipe_error") {
+            setActiveJob((prev) => prev ? { ...prev, errors: prev.errors + 1 } : prev);
+          } else if (type === "strategy_discovered") {
+            const count = Number(ev.count ?? 0);
+            setActiveJob((prev) => prev ? { ...prev, discovered: prev.discovered + count } : prev);
+          } else if (type === "done") {
+            finalJob = ev.job as Job;
+          } else if (type === "error") {
+            const message = String(ev.message ?? "Fehler");
+            setSingleError(message);
+            setActiveJob((prev) => prev ? { ...prev, status: "error", error: message, ended_at: new Date().toISOString() } : prev);
+          }
+        }
+      }
+      if (finalJob) {
+        setActiveJob(finalJob);
+        await Promise.all([reloadCases(), reloadEmerging(), reloadUsage(), reloadJobs(), reloadTargets()]);
+        if (finalJob.type === "single" && finalJob.company) {
           try {
-            const cRes = await fetch(`/api/companies/lookup?name=${encodeURIComponent(job.company)}`);
+            const cRes = await fetch(`/api/companies/lookup?name=${encodeURIComponent(finalJob.company)}`);
             if (cRes.ok) {
               const data = (await cRes.json()) as { contacts: ContactRow[] };
               setJobContacts(data.contacts);
@@ -377,11 +456,13 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
         }
       }
     } catch (err) {
-      setSingleError(err instanceof Error ? err.message : "Fehler beim Start.");
+      const msg = err instanceof Error ? err.message : "Fehler beim Start.";
+      setSingleError(msg);
+      setActiveJob((prev) => prev ? { ...prev, status: "error", error: msg, ended_at: new Date().toISOString() } : prev);
     } finally {
       setSingleSubmitting(false);
     }
-  }, [singleCompany, singleLimit, singleMode, pollJob, stopPolling]);
+  }, [singleCompany, singleLimit, singleMode, stopPolling, reloadCases, reloadEmerging, reloadUsage, reloadJobs, reloadTargets]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -1767,22 +1848,61 @@ function HubspotCompaniesTable({
   query: string;
   onQueryChange: (v: string) => void;
 }) {
-  const [companies, setCompanies] = useState<{ company_name: string; contact_count: number; is_target: boolean; last_activity: string | null }[]>([]);
+  type Row = { company_name: string; contact_count: number; is_target: boolean; last_activity: string | null };
+  const PAGE_SIZE = 100;
+  const [companies, setCompanies] = useState<Row[]>([]);
   const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [exhausted, setExhausted] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, ContactRow[] | "loading" | undefined>>({});
   const debouncedQuery = useDebouncedValue(query, 300);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const loadingRef = useRef(false);
+  const requestIdRef = useRef(0);
 
-  const load = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
-    const res = await fetch(`/api/contacts/by-company?${params.toString()}`, { cache: "no-store" });
-    if (!res.ok) return;
-    const data = (await res.json()) as { companies: typeof companies; total: number };
-    setCompanies(data.companies);
-    setTotal(data.total);
+  const fetchPage = useCallback(async (offset: number, replace: boolean) => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
+    const reqId = ++requestIdRef.current;
+    try {
+      const params = new URLSearchParams();
+      if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
+      params.set("limit", String(PAGE_SIZE));
+      params.set("offset", String(offset));
+      const res = await fetch(`/api/contacts/by-company?${params.toString()}`, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as { companies: Row[]; total: number };
+      if (reqId !== requestIdRef.current) return;
+      setTotal(data.total);
+      setCompanies((prev) => replace ? data.companies : [...prev, ...data.companies]);
+      setExhausted(data.companies.length < PAGE_SIZE || offset + data.companies.length >= data.total);
+    } finally {
+      loadingRef.current = false;
+      setLoading(false);
+    }
   }, [debouncedQuery]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setCompanies([]);
+    setExhausted(false);
+    setExpanded({});
+    fetchPage(0, true);
+  }, [fetchPage]);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || exhausted) return;
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting && !loadingRef.current && !exhausted) {
+          fetchPage(companies.length, false);
+        }
+      }
+    }, { rootMargin: "320px 0px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [fetchPage, companies.length, exhausted]);
 
   const toggle = async (companyName: string) => {
     if (expanded[companyName]) {
@@ -1809,7 +1929,7 @@ function HubspotCompaniesTable({
           onChange={(e) => onQueryChange(e.target.value)}
         />
         <div className="mono text-xs" style={{ color: "var(--ink-mute)" }}>
-          {total.toLocaleString("de-DE")} Firmen
+          {companies.length.toLocaleString("de-DE")} / {total.toLocaleString("de-DE")} Firmen
         </div>
       </div>
       <div className="overflow-x-auto">
@@ -1824,7 +1944,7 @@ function HubspotCompaniesTable({
             </tr>
           </thead>
           <tbody>
-            {companies.length === 0 && (
+            {companies.length === 0 && !loading && (
               <tr><td colSpan={5} style={{ color: "var(--ink-mute)", padding: "24px 14px" }}>
                 Keine Firmen gefunden.
               </td></tr>
@@ -1894,6 +2014,26 @@ function HubspotCompaniesTable({
             })}
           </tbody>
         </table>
+        <div ref={sentinelRef} aria-hidden style={{ height: 1 }} />
+        {!exhausted && (
+          <div className="px-5 py-3 flex items-center justify-center" style={{ color: "var(--ink-mute)" }}>
+            {loading ? (
+              <span className="text-xs">Lädt weitere Firmen…</span>
+            ) : (
+              <button
+                className="btn btn-ghost text-xs"
+                onClick={() => fetchPage(companies.length, false)}
+              >
+                Mehr laden
+              </button>
+            )}
+          </div>
+        )}
+        {exhausted && companies.length > 0 && (
+          <div className="px-5 py-3 text-xs text-center" style={{ color: "var(--ink-mute)" }}>
+            Alle {total.toLocaleString("de-DE")} Firmen geladen.
+          </div>
+        )}
       </div>
     </div>
   );
