@@ -90,22 +90,42 @@ Legende:
 
 ---
 
-## 5. Clerk (Auth für Dashboard)
+## 5. Neon Auth (Managed Better Auth, Dashboard-Login)
 
-- **Service**: https://dashboard.clerk.com
-- **App**: `b+p Mandate Radar` (Dev + Prod separat)
-- **Übergabe**: 👥 Nachfolger als Member in die Clerk-Org einladen (Admin).
-- **Secrets** (im Dashboard `web/.env.local` bzw. in der zentralen `.env`):
-  - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
-  - `CLERK_SECRET_KEY`
-  - (optional) `NEXT_PUBLIC_CLERK_SIGN_IN_URL`, `NEXT_PUBLIC_CLERK_SIGN_UP_URL`
-- **Zugelassene Nutzer**: b+p-Mitarbeiter per E-Mail in Clerk whitelisten
-  (Allowlist in Clerk-Dashboard → Users).
+- **Service**: Teil des Neon-Projekts, keine zweite Konsole.
+  Status: `neon neon-auth status`.
+- **Login-Flow**: Email + 6-stelliger OTP-Code (passwortlos). Sign-in-Page:
+  `/auth/sign-in`. Backend-Proxy: `/api/auth/[...path]`.
+- **Domain-Allowlist**: nur E-Mails auf `@b--p.de`.
+  - Clientseitig: Sign-in-Page lehnt andere Adressen ab, bevor überhaupt ein OTP
+    verschickt wird (`web/lib/auth/client.ts` → `isAllowedEmail`).
+  - Serverseitig (Defense-in-Depth): die Middleware verwirft jede Session, deren
+    `user.email` nicht auf `@b--p.de` endet, und redirectet auf
+    `/auth/sign-in?reason=domain`. Siehe `web/middleware.ts` + `web/lib/auth/server.ts`
+    → `isAllowedEmail`. Die Konstante `ALLOWED_EMAIL_DOMAIN` liegt an genau einer Stelle
+    pro Side (Client + Server), beim Domain-Wechsel beide anpassen.
+- **Benutzerverwaltung**: direkt in der Neon-Konsole oder via CLI:
+  - `neon neon-auth user list` – alle Accounts
+  - `neon neon-auth user delete <id>` – Account löschen (z. B. ausgeschiedener Mitarbeiter)
+- **Shared SMTP**: Verifizierungs-Mails gehen aktuell über `auth@mail.myneon.app`
+  (Neon-Shared). Vor echtem Prod-Deployment auf eigenes SMTP umstellen:
+  https://neon.com/docs/auth/production-checklist.md
+- **Trusted Domains**: Localhost ist per Default erlaubt. Für Prod-Host:
+  `neon neon-auth domain add https://<prod-url>`. Danach prüfen:
+  `neon neon-auth domain list`.
+- **Secrets**: nur `NEON_AUTH_COOKIE_SECRET` ist App-eigen und muss beim
+  Handover neu erzeugt werden (`openssl rand -base64 32`). Alle anderen
+  `NEON_AUTH_*`-Variablen kommen aus `neon env pull`.
 - **Checkliste**:
-  - [ ] Nachfolger als Clerk-Org-Admin eingeladen
-  - [ ] Clerk-Keys (Dev) sind in `.env` und `web/.env.local` konsistent
-  - [ ] Login über `http://localhost:3000/sign-in` funktioniert
-  - [ ] Prod-Keys bestehen bereits (falls Deployment schon vorbereitet)
+  - [ ] Nachfolger hat Zugang zur Neon-Org (siehe §2) – Auth läuft über dasselbe Login.
+  - [ ] `NEON_AUTH_COOKIE_SECRET` in `.env` neu erzeugt (nicht 1:1 übernommen).
+  - [ ] Dev-Login funktioniert: `http://localhost:3000/auth/sign-in` → eigene
+        `@b--p.de`-Adresse → Code in Posteingang → eingeloggt.
+  - [ ] Negative-Test: Login mit `@gmail.com` zeigt sofort Fehler; selbst wenn
+        ein OTP erzwungen wird, redirectet die Middleware auf
+        `?reason=domain`.
+  - [ ] Für produktives Deployment: Prod-Host als Trusted Domain eingetragen
+        und eigenes SMTP konfiguriert.
 
 ---
 
@@ -135,7 +155,10 @@ Legende:
 - **Übergabe-Vorbereitung**:
   - [ ] Vercel-Projekt-Owner übergeben (👥 Member) oder neues Projekt
   - [ ] Env-Variablen aus `docs/env-handover.md` in Vercel-Projekt übertragen
-  - [ ] Clerk-Prod-Keys verwenden (nicht Dev)
+        (frisches `NEON_AUTH_COOKIE_SECRET`, nicht Dev-Secret kopieren)
+  - [ ] Prod-Host als Neon-Auth-Trusted-Domain eintragen:
+        `neon neon-auth domain add https://<prod-url>`
+  - [ ] Custom SMTP für Neon Auth konfigurieren (Shared-SMTP ist nur für Dev)
   - [ ] Build-Command: `cd web && next build`
   - [ ] Root-Directory: `web/`
   - [ ] Node-Version: 20+
@@ -156,15 +179,21 @@ Legende:
 In genau dieser Reihenfolge, damit nichts bricht:
 
 1. Nachfolger in alle Accounts eingeladen (Schritte 1–5).
-2. Nachfolger erstellt neue Tokens: OpenAI, HubSpot, (ggf. Clerk-Secrets).
+2. Nachfolger erstellt neue Secrets: `NEON_AUTH_COOKIE_SECRET` (eigen),
+   `OPENAI_API_KEY`, `HUBSPOT_TOKEN`. Neon-Auth-Base/JWKS-URLs sind Branch-weit
+   und kommen automatisch über `neon env pull`.
 3. Nachfolger trägt neue Werte in `.env` ein, führt Smoke-Tests aus:
    - `node --env-file=.env src/index.js discover "SAP"` → ok
    - `scripts/hubspot-sync.mjs --only=companies` → ok
-   - Dashboard `/hot` lädt, Case anklickbar
+   - Dashboard-Login mit eigener `@b--p.de`-Adresse → Code kommt → eingeloggt
+   - Negative-Test: `foo@gmail.com` wird im Sign-in-Flow abgelehnt bzw.
+     Middleware redirectet auf `?reason=domain`
+   - `/hot` lädt, Case anklickbar
 4. **Erst dann** alte Tokens revoken:
    - OpenAI: Platform → API Keys → Revoke
    - HubSpot: Private App → Rotate oder Deactivate
-   - Clerk: Dev-Keys ggf. neu generieren
+   - Neon Auth: alter Cookie-Secret ist mit Rotation automatisch tot (alte
+     Sessions laufen aus; nichts weiter zu tun)
 5. Alter Owner bleibt 4 Wochen als Member in allen Systemen für Rollback.
 
 ---

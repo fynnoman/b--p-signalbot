@@ -33,8 +33,9 @@ Pipeline (`src/`):
 6. **HubSpot-Match** — zu jedem Hit die passenden b+p-Kontakte aus `hubspot_contacts`
    anzeigen (Fuzzy-Match auf `company_name`).
 
-Dashboard (`web/`): Next.js 16 / React 19, Clerk-Login, liest aus Neon,
-zeigt Hot / Auffällig / Beobachten + Zielunternehmen + Kampagnen.
+Dashboard (`web/`): Next.js 16 / React 19, Login über **Neon Auth (Managed Better
+Auth)** mit E-Mail-OTP – nur Adressen auf `@b--p.de` werden akzeptiert. Liest aus
+Neon, zeigt Hot / Auffällig / Beobachten + Zielunternehmen + Kampagnen.
 
 Zielzustand laut Memory: Umzug der LLM-Calls auf **Langdock**, enge HubSpot-Integration.
 Aktueller Stand: OpenAI direkt + HubSpot-Sync bidirektional (Lesen, Live-Pull).
@@ -62,23 +63,30 @@ personalberatung-signals/
 │   └── hubspot-sync.mjs      # Live-Pull via HubSpot-API (ersetzt CSV langfristig)
 ├── web/                      # Next.js 16 Dashboard
 │   ├── app/
-│   │   ├── (dashboard)/      # Clerk-geschützte Views
+│   │   ├── (dashboard)/      # Auth-geschützte Views (siehe middleware.ts)
 │   │   │   ├── hot/          # Priority >= 70
 │   │   │   ├── auffaellig/   # 50..70
 │   │   │   ├── beobachten/   # < 50
 │   │   │   ├── zielunternehmen/
 │   │   │   ├── kontakte/
 │   │   │   └── kampagnen/
-│   │   ├── api/              # REST-Routen (siehe §5)
-│   │   └── components/Dashboard.tsx   # Haupt-Komponente, enthält alle Views
+│   │   ├── auth/sign-in/     # E-Mail-OTP-Login (nur @b--p.de)
+│   │   ├── api/
+│   │   │   ├── auth/[...path]/ # Neon-Auth-Proxy (Managed Better Auth)
+│   │   │   └── …             # REST-Routen (siehe §5)
+│   │   └── components/
+│   │       ├── Dashboard.tsx # Haupt-Komponente, enthält alle Views
+│   │       └── UserMenu.tsx  # Account-Dropdown mit Abmelden
 │   ├── lib/
+│   │   ├── auth/server.ts    # createNeonAuth(), ALLOWED_EMAIL_DOMAIN (Server)
+│   │   ├── auth/client.ts    # createAuthClient(), ALLOWED_EMAIL_DOMAIN (Client)
 │   │   ├── db.ts             # pg-Pool, Queries für Dashboard
 │   │   ├── hubspot.ts        # HubSpot-API-Client (TS, mirror von src/hubspot/)
 │   │   ├── hubspot-sync.ts   # In-Process-Sync inkl. SSE-Streaming
 │   │   ├── jobs.ts           # In-Memory-Job-Registry für Streaming-Fortschritt
 │   │   ├── case-status.ts
 │   │   └── pipeline/         # TS-Spiegel der src/-Pipeline für Scan-UI
-│   ├── middleware.ts         # Clerk-Guard, alles außer /sign-in/*  geschützt
+│   ├── middleware.ts         # Neon-Auth-Guard + Domain-Allowlist (@b--p.de)
 │   └── next.config.ts        # lädt ../.env (zentrale Konfig im Repo-Root)
 ├── db/schema.sql             # komplettes Postgres-Schema (idempotent)
 ├── data/signal-taxonomy.json # Signal-Definitionen für LLM-Prompt
@@ -242,7 +250,11 @@ temporär umbiegen. Scale-to-Zero ist aktiv, Branches kosten nichts im Idle.
 
 ## 7. Dashboard (web/)
 
-Clerk-Login schützt alles außer `/sign-in/*` und `/sign-up/*` (`middleware.ts`).
+Neon-Auth-Login schützt alles außer `/auth/*` und `/api/auth/*` (`middleware.ts`).
+Signup ist **nur für E-Mails auf `@b--p.de`** möglich. Flow: Email eingeben →
+6-stelliger OTP-Code per Mail → eingeloggt. Serverseitige Allowlist in
+`web/middleware.ts` verwirft Sessions mit falscher Domain und redirectet auf
+`/auth/sign-in?reason=domain`.
 
 Haupt-Komponente: `web/app/components/Dashboard.tsx` (groß — enthält alle Views
 plus Drawer plus Kampagnen-Editor). Code-Split in `types.ts`, `constants.ts`,
@@ -323,7 +335,7 @@ False-Positive-Rate niedrig.
 ## 9. Betrieb & Monitoring
 
 - **Hosting**: Dashboard aktuell nur lokal (`npm run dev`). Produktiv-Deploy
-  steht noch aus (Vercel ist naheliegend wegen Next.js 16 + Clerk).
+  steht noch aus (Vercel ist naheliegend wegen Next.js 16).
 - **CLI-Scan**: läuft manuell. Für produktiv-Cron empfehlenswert: GitHub Actions
   oder Vercel Cron auf `/api/scan/all`.
 - **Logs**: alle CLI-Progresses nach `stderr`, JSON-Output nach `stdout`.
@@ -335,7 +347,8 @@ False-Positive-Rate niedrig.
 
 ## 10. Was absichtlich NICHT drin ist
 
-- Kein eigenes User-Management — Clerk macht Auth.
+- Kein eigenes User-Management — Neon Auth (Managed Better Auth) macht Login,
+  User-Tabelle liegt im `neon_auth`-Schema derselben DB.
 - Kein Zurückschreiben nach HubSpot (Deals erzeugen, Lists befüllen).
 - Keine E-Mail/Push-Benachrichtigung bei neuem Hot-Case.
 - Keine Multi-Tenant-Trennung — alles in einer DB, alles einem b+p-Account.
@@ -351,7 +364,7 @@ Zusammenfassung — Details in `docs/backlog.md`.
 
 - **Jobs-Registry In-Memory**: bei Server-Restart verliert `/api/jobs` laufende Scans.
 - **Signal-Historie-UI** nicht umgesetzt (Spec in `docs/signal-historie-spec.md`).
-- **Deployment-Setup** fehlt (Vercel + GitHub + Clerk Prod-Keys).
+- **Deployment-Setup** fehlt (Vercel + GitHub + Trusted Domain + Custom SMTP für Neon Auth).
 - **HubSpot-Push** fehlt komplett (nur Pull implementiert).
 - **Taxonomie auf 3 Signale beschränkt** — Konzept Kap. 2 sieht 7 vor.
 - **Scan-Batch nicht gescheduled** — läuft heute nur manuell.
@@ -363,7 +376,8 @@ Zusammenfassung — Details in `docs/backlog.md`.
 
 1. `docs/zugaenge.md` abarbeiten — alle Accounts übernehmen oder neu anlegen.
 2. Lokalen Scan auf 1 Firma starten: `node … src/index.js scan "Continental AG" --hit-target=1`.
-3. Dashboard lokal starten, mit Clerk-Login einen Hot-Case anklicken.
+3. Dashboard lokal starten (`cd web && npm run dev`), unter `/auth/sign-in` mit
+   eigener `@b--p.de`-Adresse einloggen (OTP-Code per Mail), Hot-Case anklicken.
 4. `docs/backlog.md` lesen, mit b+p die Priorität der offenen Punkte abstimmen.
 5. **Vor jeder größeren Pipeline-Änderung**: Neon-Branch anlegen, dort testen,
    dann über `neon branches reset` zurück oder promoten.

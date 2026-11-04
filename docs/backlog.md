@@ -18,14 +18,17 @@ Legende:
 **Status**: Dashboard läuft nur lokal (`npm run dev`).
 **Was fehlt**:
 - Vercel-Projekt (oder Alternative: Fly.io, Railway)
-- Clerk-Prod-Keys (aktuell nur Dev)
-- Env-Variablen in Hosting-Konsole hinterlegen (siehe `docs/env-handover.md`)
+- Env-Variablen in Hosting-Konsole hinterlegen (siehe `docs/env-handover.md`),
+  inkl. frisch erzeugtem `NEON_AUTH_COOKIE_SECRET` (nicht Dev-Secret übernehmen)
 - Root-Directory `web/`, Build-Command `next build`
-- Clerk-Allowlist / Organization-Mode auf b+p-Mail-Domain beschränken
+- Prod-Host als Neon-Auth-Trusted-Domain eintragen: `neon neon-auth domain add https://<prod-url>`
+- Custom SMTP für Neon Auth konfigurieren (ersetzt Shared-SMTP von `auth@mail.myneon.app`),
+  siehe https://neon.com/docs/auth/production-checklist.md
+- Domain-Allowlist `ALLOWED_EMAIL_DOMAIN` in `web/lib/auth/{server,client}.ts` prüfen
+  (steht aktuell auf `b--p.de`)
 
 **Aufwand**: 2–4 h  
-**Risiko**: Clerk-Prod-Billing beachten; Neon-Pool-Limits bei vielen parallel
-Users prüfen.
+**Risiko**: Neon-Pool-Limits bei vielen parallel Users prüfen; Shared-SMTP hat Rate-Limits.
 
 ---
 
@@ -202,8 +205,10 @@ Siehe Neon `vector`-Extension.
   bricht. Fix dauert typischerweise 1–3 h.
 - **R4**: Jina Reader kann Rate-Limiten → Fetch bricht. Workaround:
   direkte `fetch()` + Readability.js als Fallback.
-- **R5**: Clerk-Lock-In — Umzug auf eigenen Auth ist nicht trivial, aber
-  mittelfristig günstiger. Entscheidung b+p.
+- **R5**: Neon-Auth Shared-SMTP — Verifizierungs-Mails gehen aktuell über
+  `auth@mail.myneon.app` und unterliegen Shared-Rate-Limits. Vor Prod-Launch
+  muss ein eigenes SMTP (Postmark / Resend / SendGrid) konfiguriert werden,
+  sonst sind Login-Mails bei Ausfall des Shared-Providers blockiert.
 
 ---
 

@@ -19,6 +19,9 @@ Die zentrale `.env` liegt im **Repo-Root**. `web/next.config.ts` lädt sie via
 | `DATABASE_URL`           | Neon (pooled)   | automatisch via `neon env pull` | ✅ |
 | `DATABASE_URL_UNPOOLED`  | Neon (direct)   | automatisch via `neon env pull` | ✅ |
 | `NEON_BRANCH`            | Neon            | automatisch via `neon env pull` | ⚠️ |
+| `NEON_AUTH_BASE_URL`     | Neon Auth       | automatisch via `neon env pull` | ✅ |
+| `NEON_AUTH_JWKS_URL`     | Neon Auth       | automatisch via `neon env pull` | ⚠️ |
+| `NEON_AUTH_COOKIE_SECRET`| App-eigen       | **selbst erzeugen** (`openssl rand -base64 32`), nicht 1:1 übernehmen | ✅ |
 | `OPENAI_API_KEY`         | OpenAI          | **neu erzeugen**, alten revoken | ✅ |
 | `HUBSPOT_TOKEN`          | HubSpot Private App | **neu erzeugen oder rotieren** | ✅ |
 
@@ -49,6 +52,26 @@ Legende: ✅ Pflicht · ⚠️ Nice-to-have · ❌ optional.
 - **Zweck**: nur informativ, zeigt welcher Branch gerade aktiv ist.
 - **Wert aktuell**: `production`.
 - **Rotation**: nicht nötig.
+
+### `NEON_AUTH_BASE_URL` (Pflicht)
+- **Zweck**: URL der Managed-Better-Auth-Instanz dieses Branches.
+- **Quelle**: Neon-Konsole → Auth, oder automatisch via `neon env pull`.
+- **Wert aktuell**: siehe `.env`, Form `https://ep-...neonauth.c-7.us-east-2.aws.neon.tech/neondb/auth`.
+- **Rotation**: nicht nötig. Jeder Branch hat eine eigene URL.
+- **Nutzung**: `web/lib/auth/server.ts` (Server-SDK), `web/app/api/auth/[...path]/route.ts` (Proxy).
+
+### `NEON_AUTH_JWKS_URL` (optional)
+- **Zweck**: Public-Key-Set zum Verifizieren der Neon-Auth-JWTs. Nur relevant, wenn später
+  Neon Functions oder externe Clients Tokens prüfen.
+- **Rotation**: nicht nötig.
+
+### `NEON_AUTH_COOKIE_SECRET` (Pflicht)
+- **Zweck**: Signiert das Session-Cookie der Next-App.
+- **Format**: ≥ 32 Zeichen Base64, z. B. `openssl rand -base64 32`.
+- **Quelle**: App-eigen. Wird **nicht** von `neon env pull` gezogen.
+- **Übergabe**: 🔴 **Nicht 1:1 weitergeben**. Nachfolger erzeugt einen eigenen Secret,
+  trägt ihn ein, startet neu. Alte Sessions werden damit invalide – gewollt.
+- **Nutzung**: `web/lib/auth/server.ts`.
 
 ### `OPENAI_API_KEY` (Pflicht)
 - **Zweck**: Structured-Outputs-Calls in `src/extract.js`.
@@ -101,19 +124,6 @@ Legende: ✅ Pflicht · ⚠️ Nice-to-have · ❌ optional.
 
 Für produktives Deployment des Dashboards:
 
-### `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (Pflicht wenn Clerk aktiv)
-- **Zweck**: Clerk-Frontend-Key.
-- **Format**: `pk_test_...` (Dev) / `pk_live_...` (Prod)
-- **Quelle**: Clerk-Dashboard → API Keys.
-- **Nutzung**: Browser via `@clerk/nextjs`.
-
-### `CLERK_SECRET_KEY` (Pflicht wenn Clerk aktiv)
-- **Format**: `sk_test_...` / `sk_live_...`
-- **Nutzung**: `web/middleware.ts`, Server-APIs.
-
-### `NEXT_PUBLIC_CLERK_SIGN_IN_URL` / `NEXT_PUBLIC_CLERK_SIGN_UP_URL` (optional)
-- **Default**: `/sign-in`, `/sign-up` — kann meist weggelassen werden.
-
 ### Für Langdock-Migration (später)
 - `LANGDOCK_API_KEY`
 - `LANGDOCK_WORKSPACE_ID`
@@ -146,9 +156,12 @@ HUBSPOT_TOKEN=pat-eu1-...
 # --- Jina Reader (optional, nur wenn Rate-Limit knapp) ---
 # JINA_API_KEY=jina_...
 
-# --- Clerk (nur wenn Dashboard produktiv genutzt wird) ---
-# NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_...
-# CLERK_SECRET_KEY=sk_...
+# --- Neon Auth (Managed Better Auth, Dashboard-Login) ---
+# NEON_AUTH_BASE_URL und NEON_AUTH_JWKS_URL kommen aus `neon env pull`.
+NEON_AUTH_BASE_URL=https://ep-...neonauth.c-7.us-east-2.aws.neon.tech/neondb/auth
+NEON_AUTH_JWKS_URL=https://ep-...neonauth.c-7.us-east-2.aws.neon.tech/neondb/auth/.well-known/jwks.json
+# App-eigen, bitte beim Handover neu erzeugen: `openssl rand -base64 32`.
+NEON_AUTH_COOKIE_SECRET=change-me-base64-32-bytes-mindestens
 ```
 
 ---

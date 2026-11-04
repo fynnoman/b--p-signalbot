@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { UserButton } from "@clerk/nextjs";
+import UserMenu from "./UserMenu";
 import type {
   CaseRow, SignalRow, StatsRow, EmergingCompanyRow, ContactRow,
 } from "@/lib/db";
@@ -521,7 +521,7 @@ export default function Dashboard({ initialCases, initialStats, initialTargets, 
             Alle Firmen scannen
           </button>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}>
-            <UserButton />
+            <UserMenu />
           </div>
         </div>
 
